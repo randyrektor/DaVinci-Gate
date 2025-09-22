@@ -13,7 +13,7 @@ An automated DaVinci Resolve script that intelligently processes podcast audio b
 
 ## How It Works
 
-1. **Discovery**: Automatically finds hosts in your timeline (supports patterns like "1Scott", "2Wes", "3CJ")
+1. **Discovery**: Automatically finds all audio tracks with clips in your timeline (accepts any track name)
 2. **Export**: Renders individual WAV files using the "AudioOnly_IndividualClips" preset
 3. **Analysis**: Processes each WAV file to detect speech and silence segments
 4. **Timeline Manipulation**: Creates new tracks with segmented audio where silence is disabled
@@ -57,10 +57,10 @@ An automated DaVinci Resolve script that intelligently processes podcast audio b
 ## Usage
 
 1. Open DaVinci Resolve
-2. Load your podcast timeline with named audio tracks
+2. Load your podcast timeline with audio tracks containing named clips
 3. Run the script from Resolve's Scripts menu
 4. The script will automatically:
-   - Detect hosts from track names
+   - Detect all audio tracks with clips (accepts any track name)
    - Export individual WAV files
    - Analyze silence patterns
    - Create processed tracks with gated audio

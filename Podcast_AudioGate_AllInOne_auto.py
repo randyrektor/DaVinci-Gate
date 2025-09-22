@@ -110,6 +110,7 @@ try:
         "fps_hint": FPS_HINT,
         "script_dir": SCRIPT_DIR,
         "temp_dir": TEMP_DIR,
+        "track_name_normalize": True,
     }
     print(">>> Loaded configuration from config.py")
 except ImportError:
@@ -129,6 +130,7 @@ except ImportError:
         "fps_hint": 30,
         "script_dir": None,
         "temp_dir": None,
+        "track_name_normalize": True,
     }
     print(">>> Using default configuration (config.py not found)")
 
@@ -189,7 +191,7 @@ def append_in_chunks(infos, mp, size=None):
     return out
 
 def discover_hosts(tl):
-    """Find all host compounds in the timeline."""
+    """Find all audio tracks with clips in the timeline."""
     hosts = []
     seen = set()
     
@@ -198,11 +200,15 @@ def discover_hosts(tl):
         for item in items:
             try:
                 name = item.GetName()
-                # Use regex to catch patterns like "1Scott", "01-Scott", "2_Wes", "3 CJ", etc.
-                m = re.match(r"^\s*\d+\s*[-_ ]?\s*(.+?)\s*$", name or "", re.I)
-                if m:
-                    host_name = normalize_name(m.group(1))
+                # Accept any non-empty track name
+                if name and name.strip():
+                    # Use the original name as the host name, or normalize if configured
+                    if CONFIG.get("track_name_normalize", True):
+                        host_name = normalize_name(name.strip())
+                    else:
+                        host_name = name.strip()
                     
+                    # Skip if we've already seen this name
                     if host_name not in seen:
                         hosts.append({
                             "name": host_name,
@@ -211,12 +217,12 @@ def discover_hosts(tl):
                             "item": item
                         })
                         seen.add(host_name)
-                        print(f">>> Found host: '{name}' -> '{host_name}'")
+                        print(f">>> Found track: '{name}' -> '{host_name}'")
             except:
                 continue
     
     if not hosts:
-        raise RuntimeError("No host compounds found (expected names like '1Scott', '2CJ').")
+        raise RuntimeError("No audio tracks with clips found. Please ensure your timeline has audio tracks with named clips.")
     return hosts
 
 def process_host(tl, mp, host, fps, assigned_track_index, resolve_obj):
