@@ -26,12 +26,21 @@ An automated DaVinci Resolve script that intelligently processes podcast audio b
    /Users/[username]/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/
    ```
 
-2. Install required Python dependencies:
+2. Import the render preset:
+   - Copy `AudioOnly_IndividualClips_Render.xml` to your DaVinci Resolve presets folder
+   - Or manually create a render preset with these settings:
+     - Format: WAV
+     - Audio Codec: LPCM
+     - Audio Bit Depth: 24-bit
+     - Sample Rate: 48kHz
+     - Custom Name: `%{Clip Name}`
+
+3. Install required Python dependencies:
    ```bash
    pip install pydub
    ```
 
-3. Ensure `ffmpeg` is installed and available in your PATH
+4. Ensure `ffmpeg` is installed and available in your PATH
 
 ## Usage
 
@@ -56,6 +65,7 @@ An automated DaVinci Resolve script that intelligently processes podcast audio b
 
 - `detect_silence.py`: Core silence detection algorithm using `pydub`
 - `Podcast_AudioGate_AllInOne_auto.py`: Main DaVinci Resolve automation script
+- `AudioOnly_IndividualClips_Render.xml`: DaVinci Resolve render preset for individual WAV export
 
 ## Configuration
 
