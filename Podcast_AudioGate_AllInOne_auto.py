@@ -575,10 +575,10 @@ def main():
             # Look for the WAV file with the actual naming pattern
             wav_file = None
             patterns_to_try = [
-                f"{host['clip']}.wav",                    # Expected: 1Scott.wav
-                f"{host['clip']}00000000.wav",            # Actual: 1Scott00000000.wav
-                f"{host['name']}.wav",                    # Fallback: Scott.wav
-                f"{host['name']}00000000.wav"             # Fallback: Scott00000000.wav
+                f"{host['clip']}.wav",                    # Expected: [TrackName].wav
+                f"{host['clip']}00000000.wav",            # Actual: [TrackName]00000000.wav
+                f"{host['name']}.wav",                    # Fallback: [NormalizedName].wav
+                f"{host['name']}00000000.wav"             # Fallback: [NormalizedName]00000000.wav
             ]
             
             for pattern in patterns_to_try:
