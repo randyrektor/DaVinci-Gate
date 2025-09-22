@@ -21,12 +21,31 @@ An automated DaVinci Resolve script that intelligently processes podcast audio b
 
 ## Installation
 
-1. Copy both Python files to your DaVinci Resolve Scripts directory:
-   ```
-   /Users/[username]/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/
+### Quick Setup (Recommended)
+
+1. **Run the setup script** (handles everything automatically):
+   ```bash
+   python setup.py
    ```
 
-2. Import the render preset:
+### Manual Setup
+
+1. **Install dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. **Install ffmpeg** (required for audio processing):
+   - **macOS**: `brew install ffmpeg`
+   - **Windows**: Download from [ffmpeg.org](https://ffmpeg.org/download.html)
+   - **Linux**: `sudo apt install ffmpeg` (Ubuntu/Debian)
+
+3. **Copy files to DaVinci Resolve**:
+   - **macOS**: `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/`
+   - **Windows**: `~/AppData/Roaming/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/`
+   - **Linux**: `~/.local/share/DaVinciResolve/Fusion/Scripts/Utility/`
+
+4. **Import the render preset**:
    - Copy `AudioOnly_IndividualClips_Render.xml` to your DaVinci Resolve presets folder
    - Or manually create a render preset with these settings:
      - Format: WAV
@@ -34,13 +53,6 @@ An automated DaVinci Resolve script that intelligently processes podcast audio b
      - Audio Bit Depth: 24-bit
      - Sample Rate: 48kHz
      - Custom Name: `%{Clip Name}`
-
-3. Install required Python dependencies:
-   ```bash
-   pip install pydub
-   ```
-
-4. Ensure `ffmpeg` is installed and available in your PATH
 
 ## Usage
 
@@ -65,17 +77,39 @@ An automated DaVinci Resolve script that intelligently processes podcast audio b
 
 - `detect_silence.py`: Core silence detection algorithm using `pydub`
 - `Podcast_AudioGate_AllInOne_auto.py`: Main DaVinci Resolve automation script
+- `config.py`: Configuration file with customizable settings
+- `setup.py`: Automated setup script for easy installation
 - `AudioOnly_IndividualClips_Render.xml`: DaVinci Resolve render preset for individual WAV export
+- `requirements.txt`: Python dependencies
 
 ## Configuration
 
-The script includes several configurable parameters:
+The script includes a comprehensive configuration system. Edit `config.py` to customize behavior:
 
-- **Silence Threshold**: `-50.0 dB` (adjustable in `detect_silence.py`)
-- **Minimum Silence Duration**: `600ms` 
-- **Padding**: `120ms` around speech segments
-- **Crossfades**: `20ms` for smooth transitions
-- **Batch Size**: `250` segments per append operation
+### Audio Processing Settings
+- **Silence Threshold**: `-50.0 dB` - Threshold for detecting silence
+- **Minimum Silence Duration**: `600ms` - Minimum length to consider as silence
+- **Padding**: `120ms` - Padding around speech segments
+- **Hold Time**: `500ms` - Extra hold time at end of speech segments
+
+### Render Settings
+- **Output Format**: `wav` - Audio output format
+- **Audio Codec**: `lpcm` - Audio codec for rendering
+- **Bit Depth**: `24` - Audio bit depth
+- **Sample Rate**: `48000` - Audio sample rate
+
+### Processing Settings
+- **Crossfades**: `20ms` - Crossfade duration for smooth transitions
+- **Batch Size**: `250` - Number of segments to process in each batch
+- **FPS Hint**: `30` - FPS for frame-based calculations
+
+### Advanced Settings
+- **Max JSON Age**: `86400` seconds (24 hours) - How long to keep cached results
+- **Merge Tolerance**: `100ms` - Tolerance for merging nearby segments
+- **Min Silence Gap**: `1` frame - Minimum silence gap to preserve
+
+### Platform-Specific Paths
+The script automatically detects DaVinci Resolve installation paths, but you can override them in `config.py` if needed.
 
 ## Output
 

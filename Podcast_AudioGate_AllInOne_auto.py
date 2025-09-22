@@ -28,7 +28,7 @@ except NameError:
 possible_paths = [
     script_dir,
     os.path.join(script_dir, "Utility"),
-    "/Users/randyrektor/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility",
+    os.path.expanduser("~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility"),
     os.getcwd()
 ]
 
@@ -50,13 +50,34 @@ except ImportError as e:
     print(f"ERROR: Could not import detect_silence.py: {e}")
     sys.exit(1)
 
-# --- Resolve API bootstrap (macOS) ---
-candidates = [
-    os.path.join(os.environ.get("RESOLVE_SCRIPT_API",""), "Modules"),
-    "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Resources/Developer/Scripting/Modules",
-    "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules",
-    os.path.expanduser("~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules"),
-]
+# --- Resolve API bootstrap (Cross-platform) ---
+candidates = []
+
+# Add environment variable path if set
+if os.environ.get("RESOLVE_SCRIPT_API"):
+    candidates.append(os.path.join(os.environ.get("RESOLVE_SCRIPT_API"), "Modules"))
+
+# macOS paths
+if sys.platform == "darwin":
+    candidates.extend([
+        "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Resources/Developer/Scripting/Modules",
+        "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules",
+        os.path.expanduser("~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules"),
+    ])
+# Windows paths
+elif sys.platform == "win32":
+    candidates.extend([
+        os.path.expanduser("~/AppData/Roaming/Blackmagic Design/DaVinci Resolve/Support/Developer/Scripting/Modules"),
+        "C:/Program Files/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules",
+        "C:/Program Files (x86)/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules",
+    ])
+# Linux paths
+elif sys.platform.startswith("linux"):
+    candidates.extend([
+        os.path.expanduser("~/.local/share/DaVinciResolve/Developer/Scripting/Modules"),
+        "/opt/resolve/Developer/Scripting/Modules",
+        "/usr/local/DaVinciResolve/Developer/Scripting/Modules",
+    ])
 for p in candidates:
     if p and os.path.isdir(p) and p not in sys.path:
         sys.path.append(p)
@@ -71,6 +92,46 @@ except Exception as e:
 # Configuration
 RENDER_PRESET = "AudioOnly_IndividualClips"
 
+# Load configuration
+try:
+    from config import *
+    CONFIG = {
+        "render_preset": RENDER_PRESET,
+        "output_format": OUTPUT_FORMAT,
+        "audio_codec": AUDIO_CODEC,
+        "audio_bit_depth": AUDIO_BIT_DEPTH,
+        "audio_sample_rate": AUDIO_SAMPLE_RATE,
+        "silence_threshold_db": SILENCE_THRESHOLD_DB,
+        "min_silence_ms": MIN_SILENCE_MS,
+        "padding_ms": PADDING_MS,
+        "hold_ms": HOLD_MS,
+        "crossfade_ms": CROSSFADE_MS,
+        "batch_size": BATCH_SIZE,
+        "fps_hint": FPS_HINT,
+        "script_dir": SCRIPT_DIR,
+        "temp_dir": TEMP_DIR,
+    }
+    print(">>> Loaded configuration from config.py")
+except ImportError:
+    # Fallback configuration if config.py is not found
+    CONFIG = {
+        "render_preset": "AudioOnly_IndividualClips",
+        "output_format": "wav",
+        "audio_codec": "lpcm", 
+        "audio_bit_depth": "24",
+        "audio_sample_rate": "48000",
+        "silence_threshold_db": -50.0,
+        "min_silence_ms": 600,
+        "padding_ms": 120,
+        "hold_ms": 500,
+        "crossfade_ms": 20,
+        "batch_size": 250,
+        "fps_hint": 30,
+        "script_dir": None,
+        "temp_dir": None,
+    }
+    print(">>> Using default configuration (config.py not found)")
+
 def which(x): 
     """Check if executable exists in PATH."""
     return any(os.path.exists(os.path.join(p, x)) for p in os.getenv("PATH","").split(os.pathsep))
@@ -84,7 +145,11 @@ warnings.filterwarnings("ignore", message="Couldn't find ffmpeg or avconv")
 print(">>> Using pydub's ffmpeg detection (may show warning but will work)")
 
 # Use temporary directory for safer handling
-OUTDIR = tempfile.mkdtemp(prefix="_temp_gate_")
+if CONFIG["temp_dir"]:
+    OUTDIR = CONFIG["temp_dir"]
+    os.makedirs(OUTDIR, exist_ok=True)
+else:
+    OUTDIR = tempfile.mkdtemp(prefix="_temp_gate_")
 print(f">>> Using temporary directory: {OUTDIR}")
 
 def s2f(seconds, fps):
@@ -111,8 +176,10 @@ def json_fresh(host_name, src_mtime, max_age=86400):
     jp = os.path.join(OUTDIR, f"{host_name}.json")
     return os.path.exists(jp) and os.path.getmtime(jp) >= src_mtime and (time.time()-os.path.getmtime(jp)) < max_age
 
-def append_in_chunks(infos, mp, size=250):
+def append_in_chunks(infos, mp, size=None):
     """Append timeline items in chunks to avoid large batch failures."""
+    if size is None:
+        size = CONFIG["batch_size"]
     out = []
     for i in range(0, len(infos), size):
         chunk = infos[i:i+size]
@@ -251,7 +318,7 @@ def process_host(tl, mp, host, fps, assigned_track_index, resolve_obj):
 
     # Disable silence segments and add crossfades
     disabled_count = 0
-    fade_s = 0.02  # 20ms crossfades
+    fade_s = CONFIG["crossfade_ms"] / 1000.0  # Convert ms to seconds
     fade_f = max(1, int(fade_s * fps))
     
     for i, item in enumerate(items):
@@ -389,8 +456,8 @@ def main():
         presets = proj.GetRenderPresets()
         print(f">>> Available render presets: {presets}")
         
-        # Use local variable for render preset
-        render_preset = RENDER_PRESET
+        # Use configuration for render preset
+        render_preset = CONFIG["render_preset"]
         
         # Check if preset exists in the values (preset names)
         preset_names = list(presets.values())
@@ -437,10 +504,10 @@ def main():
             "TargetDir": OUTDIR,
             "CustomName": "%{Clip Name}",  # Use curly braces as in the preset
             "UniqueFilenames": True,       # Ensure unique filenames
-            "Format": "wav",               # Force WAV format
-            "AudioCodec": "lpcm",          # Use LPCM as in the preset
-            "AudioBitDepth": "24",         # 24-bit as in the preset
-            "AudioSampleRate": "48000"     # 48kHz sample rate
+            "Format": CONFIG["output_format"],
+            "AudioCodec": CONFIG["audio_codec"],
+            "AudioBitDepth": CONFIG["audio_bit_depth"],
+            "AudioSampleRate": CONFIG["audio_sample_rate"]
         }
         
         try:
@@ -535,7 +602,14 @@ def main():
                     print(f">>> [{host['name']}] Processing WAV file: {os.path.basename(wav_file)}")
                     
                     # Process the WAV file
-                    result = detect_silence(wav_file, out_json=json_path)
+                    result = detect_silence(
+                        wav_file, 
+                        min_sil_ms=CONFIG["min_silence_ms"],
+                        pad_ms=CONFIG["padding_ms"],
+                        out_json=json_path,
+                        silence_thresh_db=CONFIG["silence_threshold_db"],
+                        fps_hint=CONFIG["fps_hint"]
+                    )
                     print(f">>> [{host['name']}] detect_silence returned: {len(result) if result else 'None'} segments")
                     
                     if os.path.exists(json_path):

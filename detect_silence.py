@@ -2,7 +2,7 @@ from pydub import AudioSegment
 from pydub.silence import detect_nonsilent
 import os, sys, json
 
-def detect_silence(wav_path, min_sil_ms=600, pad_ms=120, out_json=None, silence_thresh_db=-50.0):
+def detect_silence(wav_path, min_sil_ms=600, pad_ms=120, out_json=None, silence_thresh_db=-50.0, fps_hint=30):
     """Detect silence segments in audio file and return segments list."""
     print(f"detect_silence: Processing {wav_path}")
     print(f"detect_silence: Parameters - min_sil_ms={min_sil_ms}, pad_ms={pad_ms}, out_json={out_json}, silence_thresh_db={silence_thresh_db}")
@@ -34,7 +34,7 @@ def detect_silence(wav_path, min_sil_ms=600, pad_ms=120, out_json=None, silence_
             merged.append((s, e))
     
     # Optional: swallow micro-silence between speech if it's tiny (≈ one frame)
-    fps = float(os.environ.get("FPS_HINT", "30"))
+    fps = float(os.environ.get("FPS_HINT", str(fps_hint)))
     frame_ms = 1000.0 / fps
     min_sil_gap_ms = int(round(1 * frame_ms))
     coalesced = []
