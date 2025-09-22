@@ -19,6 +19,8 @@ An automated DaVinci Resolve script that intelligently processes podcast audio b
 4. **Timeline Manipulation**: Creates new tracks with segmented audio where silence is disabled
 5. **Sync Maintenance**: Preserves original timing by keeping all segments but muting silence
 
+<img width="2542" height="414" alt="Screenshot 2025-09-22 at 10 29 45 AM" src="https://github.com/user-attachments/assets/3d82eda1-75fa-406c-9d0f-743fe7bda250" />
+
 ## Installation
 
 ### Quick Setup (Recommended)
