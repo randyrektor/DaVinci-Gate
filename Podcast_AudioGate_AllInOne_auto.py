@@ -301,7 +301,6 @@ def process_host(tl, mp, host, fps, assigned_track_index, resolve_obj, fresh_mpi
     
     # Load silence detection results
     json_path = os.path.join(OUTDIR, f"{host['name']}.json")
-    print(f">>> Looking for JSON file: {json_path}")
     
     with open(json_path, 'r') as f:
         data = json.load(f)
@@ -319,13 +318,10 @@ def process_host(tl, mp, host, fps, assigned_track_index, resolve_obj, fresh_mpi
         print(f">>> ERROR: No original item for {host['name']}")
         return
     
-    print(f">>> Using original item as source: {original_item.GetStart()}-{original_item.GetEnd()}")
-    
     # Use fresh Media Pool Item if available, otherwise use original after compound deletion
     if fresh_mpis and host['name'] in fresh_mpis:
         mpi = fresh_mpis[host['name']]
-        print(f">>> Using fresh Media Pool Item for {host['name']}: {mpi}")
-        print(f">>> Fresh Media Pool Item should avoid Source Patch issues")
+        print(f">>> Using fresh Media Pool Item for {host['name']}")
     else:
         # Use original Media Pool Item (compounds have been deleted, so this should work better)
         original_mpi = original_item.GetMediaPoolItem()
@@ -333,10 +329,9 @@ def process_host(tl, mp, host, fps, assigned_track_index, resolve_obj, fresh_mpi
             print(f">>> ERROR: Could not get media pool item for {host['name']}")
             return
         mpi = original_mpi
-        print(f">>> Using original Media Pool Item for {host['name']}: {mpi}")
-        print(f">>> Compound deletion should help with Source Patch issues")
+        print(f">>> Using original Media Pool Item for {host['name']}")
     
-    # Duration clamping (optional but robust)
+    # Duration clamping
     dur_frames = None
     try:
         frames_str = (mpi.GetClipProperty("Frames") or "").strip()
@@ -345,7 +340,7 @@ def process_host(tl, mp, host, fps, assigned_track_index, resolve_obj, fresh_mpi
     except:
         pass
 
-    # Build ALL segments (speech + silence) to maintain sync
+    # Build all segments to maintain sync
     def clamp(v, lo, hi): 
         return max(lo, min(v, hi))
     
@@ -604,14 +599,6 @@ def main():
         proj.SetCurrentRenderMode(0)  # Individual clips
         print(f">>> Setting render mode...")
         
-        # Debug: Check what the preset actually set
-        try:
-            current_settings = proj.GetRenderSettings()
-            print(f">>> DEBUG: Current render settings after preset load:")
-            for key, value in current_settings.items():
-                print(f">>>   {key}: {value}")
-        except Exception as e:
-            print(f">>> DEBUG: Could not get current render settings: {e}")
         
         # Set only essential settings - let the preset handle format and codec
         render_settings = {
@@ -627,14 +614,6 @@ def main():
             print(f">>> WARNING: Could not set render settings: {e}")
             return
         
-        # Debug: Check what settings are now active
-        try:
-            final_settings = proj.GetRenderSettings()
-            print(f">>> DEBUG: Final render settings before render:")
-            for key, value in final_settings.items():
-                print(f">>>   {key}: {value}")
-        except Exception as e:
-            print(f">>> DEBUG: Could not get final render settings: {e}")
         
         # Add render job
         job_id = proj.AddRenderJob()
@@ -686,16 +665,14 @@ def main():
     if not skip_render:
         print(f">>> Checking for exported WAV files in: {OUTDIR}")
         
-        # First, let's see what files were actually exported
         all_wav_files = glob.glob(os.path.join(OUTDIR, "*.wav"))
-        print(f">>> All WAV files found: {[os.path.basename(f) for f in all_wav_files]}")
+        print(f">>> Found {len(all_wav_files)} WAV files")
         
         # Collect individual WAV files for each host
         per_host_wavs = []
         for host in hosts:
-            print(f">>> Collecting WAV file for {host['name']} (clip: {host['clip']})")
+            print(f">>> Processing {host['name']}...")
             
-            # Look for the WAV file with the actual naming pattern
             wav_file = None
             patterns_to_try = [
                 f"{host['clip']}.wav",                    # Expected: [TrackName].wav
@@ -716,19 +693,19 @@ def main():
                 print(f">>> Available WAV files: {[os.path.basename(f) for f in all_wav_files]}")
                 continue
             
-            print(f">>> Found WAV file: {os.path.basename(wav_file)}")
+            print(f">>> Found: {os.path.basename(wav_file)}")
             per_host_wavs.append((host, wav_file))
         
         # Process silence detection using exported WAV files
         if per_host_wavs:
-            print(f">>> Processing {len(per_host_wavs)} WAV files for silence detection...")
+            print(f">>> Running silence detection on {len(per_host_wavs)} files...")
             
             successful = 0
             for host, wav_file in per_host_wavs:
                 json_path = os.path.join(OUTDIR, f"{host['name']}.json")
                 
                 try:
-                    print(f">>> [{host['name']}] Processing WAV file: {os.path.basename(wav_file)}")
+                    print(f">>> [{host['name']}] Analyzing: {os.path.basename(wav_file)}")
                     
                     # Process the WAV file
                     result = detect_silence(
@@ -739,19 +716,17 @@ def main():
                         silence_thresh_db=CONFIG["silence_threshold_db"],
                         fps_hint=CONFIG["fps_hint"]
                     )
-                    print(f">>> [{host['name']}] detect_silence returned: {len(result) if result else 'None'} segments")
+                    print(f">>> [{host['name']}] Found {len(result) if result else 'None'} segments")
                     
                     if os.path.exists(json_path):
                         file_size = os.path.getsize(json_path)
-                        print(f">>> [{host['name']}] SUCCESS: Created {os.path.basename(json_path)} ({file_size} bytes)")
+                        print(f">>> [{host['name']}] SUCCESS: {os.path.basename(json_path)}")
                         
                         # Verify JSON content
                         try:
                             with open(json_path, 'r') as f:
                                 json_data = json.load(f)
                             print(f">>> [{host['name']}] JSON contains {len(json_data)} segments")
-                            if json_data:
-                                print(f">>> [{host['name']}] First segment: {json_data[0]}")
                         except Exception as json_e:
                             print(f">>> [{host['name']}] WARNING: Could not read JSON content: {json_e}")
                         successful += 1
@@ -762,49 +737,39 @@ def main():
                     import traceback
                     print(f">>> [{host['name']}] Traceback: {traceback.format_exc()}")
             
-            print(f">>> WAV processing complete: {successful}/{len(per_host_wavs)} successful")
+            print(f">>> Silence detection complete: {successful}/{len(per_host_wavs)} successful")
         else:
             print(f">>> No WAV files found for processing")
     else:
         print(f">>> Skipped silence detection - using existing JSON files")
     
     # Switch to edit page and refresh handles
-    print(f">>> Switching to edit page and refreshing handles...")
     proj, tl, mp = refresh_handles(resolve)
-    print(f">>> Handles refreshed after rendering")
     
-    # Verify all silence detection files are ready
-    print(f">>> Verifying all silence detection files are ready...")
+    # Verify silence detection files
     for host in hosts:
         json_path = os.path.join(OUTDIR, f"{host['name']}.json")
-        if os.path.exists(json_path):
-            age = time.time() - os.path.getmtime(json_path)
-            print(f">>> {host['name']}.json ready ({age:.1f}s old)")
-        else:
+        if not os.path.exists(json_path):
             print(f">>> WARNING: {host['name']}.json not found")
     
     # Create tracks and process hosts
-    print(f">>> Creating segmented tracks...")
     
     # Create all tracks first
-    print(f">>> Creating all tracks first...")
     track_assignments = {}
     for i, host in enumerate(hosts):
-        print(f">>> Creating track for {host['name']}...")
-        # AddTrack returns True/False, not track index. Get current track count before adding
+        # Get current track count before adding
         current_track_count = tl.GetTrackCount("audio")
         success = tl.AddTrack("audio")
         if success:
             new_track_index = current_track_count + 1  # New track will be at this index
             tl.SetTrackName("audio", new_track_index, f"[Processed] {host['name']}")
             track_assignments[host['name']] = new_track_index
-            print(f">>> {host['name']} assigned to track {new_track_index}")
+            print(f">>> Created track {new_track_index} for {host['name']}")
         else:
             print(f">>> ERROR: Failed to create track for {host['name']}")
             return
     
-    # Verify all tracks created
-    print(f">>> Verifying all tracks created...")
+    # Verify tracks created
     for host in hosts:
         assigned_track = track_assignments[host['name']]
         track_items = tl.GetItemListInTrack("audio", assigned_track) or []
@@ -812,43 +777,32 @@ def main():
     
     # Get FPS from timeline settings
     fps = float(proj.GetSetting("timelineFrameRate") or "29.97")
-    fps_int = round(fps)
-    print(f">>> Timeline FPS: {fps} (rounded: {fps_int})")
     
-    # Process all hosts with timeline manipulation
-    print(f">>> Processing all hosts with timeline manipulation...")
-    
+    # Process all hosts
     for i, host in enumerate(hosts):
-        print(f">>> Processing host {i+1}/{len(hosts)}: {host['name']}")
+        print(f">>> Processing {host['name']} ({i+1}/{len(hosts)})")
         assigned_track = track_assignments[host['name']]
-        print(f">>> {host['name']} assigned to track {assigned_track}")
         
-        # Process this host with timeline manipulation
-        print(f">>> Processing {host['name']} on track {assigned_track}...")
         process_host(tl, mp, host, fps, assigned_track, resolve, fresh_mpis)
         
-        # Verify results immediately after processing
+        # Verify results
         track_items = tl.GetItemListInTrack("audio", assigned_track) or []
-        print(f">>> {host['name']} final track count: {len(track_items)} items")
+        print(f">>> {host['name']}: {len(track_items)} clips on track {assigned_track}")
         
-        # Wait between hosts
+        # Brief pause between hosts
         if i < len(hosts) - 1:
-            print(f">>> Waiting before next host...")
-            time.sleep(1)
+            time.sleep(0.5)
     
-    # Mute original tracks for easy A/B comparison
-    print(f">>> Muting original tracks for A/B comparison...")
+    # Mute original tracks for A/B comparison
     for host in hosts:
         try:
             original_track = host["track"]
             tl.SetTrackMute("audio", original_track, True)
-            print(f">>> Muted original track {original_track} ({host['name']})")
         except Exception as e:
             print(f">>> Could not mute track {host['track']}: {e}")
     
     # Final summary
-    print(f">>> Done. Applied silence gating to existing tracks")
-    print(f">>> Final track count: {tl.GetTrackCount('audio')}")
+    print(f">>> Done. Applied silence gating to {len(hosts)} tracks")
     for i in range(1, tl.GetTrackCount("audio") + 1):
         try:
             name = tl.GetTrackName("audio", i) or f"Track {i}"
