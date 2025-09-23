@@ -176,6 +176,11 @@ def main():
     print("1. Open DaVinci Resolve")
     print("2. Go to Workspace > Scripts > Utility")
     print("3. Run 'Podcast_AudioGate_AllInOne_auto'")
+    print("\nIMPORTANT USAGE NOTES:")
+    print("• For best results, place all compound clips on a single audio track")
+    print("• The script processes one source track at a time")
+    print("• For multiple tracks, process them separately and combine results")
+    print("• See README.md for detailed usage patterns and workarounds")
     print("\nTo customize settings, edit the config.py file in the script directory")
     
     return True

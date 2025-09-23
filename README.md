@@ -19,6 +19,19 @@ An automated DaVinci Resolve script that intelligently processes podcast audio b
 4. **Timeline Manipulation**: Creates new tracks with segmented audio where silence is disabled
 5. **Sync Maintenance**: Preserves original timing by keeping all segments but muting silence
 
+## Usage Patterns
+
+### Single Track Processing (Recommended)
+- **Best for**: Most podcast workflows
+- **Setup**: Place all compound clips on a single audio track
+- **Result**: One processed track with all hosts' audio gated together
+- **Advantage**: Avoids source patch limitations, most efficient
+
+### Multi-Track Processing
+- **Current limitation**: Only processes one source track at a time
+- **Workaround**: Process tracks separately, then copy/paste results back
+- **Alternative**: Use different timelines for each track, then combine results
+
 <img width="2542" height="414" alt="Screenshot 2025-09-22 at 10 29 45 AM" src="https://github.com/user-attachments/assets/3d82eda1-75fa-406c-9d0f-743fe7bda250" />
 
 ## Quick Start
@@ -71,16 +84,42 @@ An automated DaVinci Resolve script that intelligently processes podcast audio b
 
 ## Usage
 
-1. Open DaVinci Resolve
-2. Load your podcast timeline with audio tracks containing named clips
-3. Run `Podcast_AudioGate_AllInOne_auto.py` from Resolve's Scripts menu
-4. The script will automatically:
-   - Detect all audio tracks with clips (accepts any track name)
+### Recommended Workflow (Single Track)
+
+1. **Prepare your timeline**:
+   - Place all compound clips (e.g., "1Scott", "2Wes", "3CJ") on a single audio track
+   - Ensure clips have descriptive names that will become the host names
+
+2. **Run the script**:
+   - Open DaVinci Resolve
+   - Go to Workspace > Scripts > Utility
+   - Run `Podcast_AudioGate_AllInOne_auto.py`
+
+3. **The script will automatically**:
+   - Detect all compound clips on the source track
    - Export individual WAV files using the AudioOnly_IndividualClips preset
    - Analyze silence patterns using pydub
-   - Create processed tracks with gated audio
+   - Create one processed track with all hosts' gated audio
    - Apply crossfades and disable silence segments
-   - Mute original tracks for easy A/B comparison
+   - Mute original track for easy A/B comparison
+
+### Multi-Track Workflow (Advanced)
+
+If you need to process multiple source tracks:
+
+1. **Process one track at a time**:
+   - Move all compound clips to a single track
+   - Run the script
+   - Copy the processed result to a new timeline or track
+
+2. **Repeat for other tracks**:
+   - Move the next set of compound clips to the same track
+   - Run the script again
+   - Copy results to your main timeline
+
+3. **Combine results**:
+   - Copy all processed segments back to your main timeline
+   - Organize them as needed
 
 ## Requirements
 
@@ -137,9 +176,14 @@ The script creates new tracks named `[Processed] [HostName]` with:
 
 ## Known Limitations
 
-- **Source Patch Limitation**: Due to DaVinci Resolve's internal Source Patch mechanism, only the first host's clips will appear on their assigned track. Subsequent hosts will show 0 clips on their tracks, even though the API reports successful append operations. This is a known limitation of the DaVinci Resolve API when using the same Media Pool Item across multiple tracks.
+- **Single Source Track Processing**: The script currently processes one source track at a time. For multiple source tracks, you need to process them separately and combine results manually.
 
-- **Current Status**: The script includes compound deletion and cleanup logic to help mitigate this issue, but the Source Patch limitation may still affect multiple hosts in some cases.
+- **Source Patch Limitation**: Due to DaVinci Resolve's internal Source Patch mechanism, when processing multiple hosts from the same source track, all hosts are processed together on a single destination track. This is actually beneficial as it avoids the API limitations that occur when trying to place the same Media Pool Item on multiple tracks.
+
+- **Workarounds**:
+  - **Recommended**: Place all compound clips on a single track for one-pass processing
+  - **Multi-track**: Process each track separately, then copy/paste results back
+  - **Timeline approach**: Use different timelines for each track, then combine results
 
 ## Troubleshooting
 
