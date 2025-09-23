@@ -185,7 +185,9 @@ def append_in_chunks(infos, mp, size=None):
     out = []
     for i in range(0, len(infos), size):
         chunk = infos[i:i+size]
+        print(f">>> DEBUG: Appending chunk {i//size + 1}/{(len(infos) + size - 1)//size} with {len(chunk)} items")
         result = mp.AppendToTimeline(chunk) or []
+        print(f">>> DEBUG: AppendToTimeline returned {len(result)} items for this chunk")
         out.extend(result)
         print(f">>> Appended chunk {i//size + 1}/{(len(infos) + size - 1)//size} ({len(chunk)} items)")
     return out
@@ -225,7 +227,95 @@ def discover_hosts(tl):
         raise RuntimeError("No audio tracks with clips found. Please ensure your timeline has audio tracks with named clips.")
     return hosts
 
-def process_host(tl, mp, host, fps, assigned_track_index, resolve_obj):
+def process_host_new_timeline(tl, mp, host, fps, track_index, resolve_obj):
+    """Process a single host and append to new timeline with silence gating."""
+    
+    print(f">>> {host['name']}: Processing for new timeline on track {track_index}")
+    
+    # Load JSON data
+    json_path = os.path.join(OUTDIR, f"{host['name']}.json")
+    if not os.path.exists(json_path):
+        print(f">>> ERROR: {host['name']}.json not found")
+        return
+    
+    try:
+        with open(json_path, 'r') as f:
+            segments = json.load(f)
+        print(f">>> {host['name']}: Loaded {len(segments)} segments from JSON")
+        if segments:
+            print(f">>> {host['name']}: First segment keys: {list(segments[0].keys())}")
+    except Exception as e:
+        print(f">>> ERROR: Could not load {host['name']}.json: {e}")
+        return
+    
+    # Get the original Media Pool Item
+    original_item = host["item"]
+    mpi = original_item.GetMediaPoolItem()
+    if not mpi:
+        print(f">>> ERROR: Could not get media pool item for {host['name']}")
+        return
+    
+    # Create clip infos for all segments
+    all_clip_infos = []
+    for i, seg in enumerate(segments):
+        # Handle different JSON formats
+        if "start_sec" in seg and "end_sec" in seg:
+            # detect_silence format
+            sF = int(seg["start_sec"] * fps)
+            eF = int(seg["end_sec"] * fps)
+            is_silence = seg.get("is_silence", False)
+        elif "start" in seg and "end" in seg:
+            # Alternative format
+            sF = int(seg["start"] * fps)
+            eF = int(seg["end"] * fps)
+            is_silence = seg.get("is_silence", False)
+        elif "start_time" in seg and "end_time" in seg:
+            # Another alternative format
+            sF = int(seg["start_time"] * fps)
+            eF = int(seg["end_time"] * fps)
+            is_silence = seg.get("is_silence", False)
+        else:
+            print(f">>> WARNING: Unknown segment format: {seg}")
+            continue
+            
+        recF = sF  # Record at the start of each segment
+        
+        clip_info = {
+            "mediaPoolItem": mpi,
+            "startFrame": sF,
+            "endFrame": eF,
+            "mediaType": 2,  # Audio
+            "recordFrame": recF,
+            "trackIndex": track_index,
+            "is_silence": is_silence
+        }
+        all_clip_infos.append(clip_info)
+    
+    print(f">>> {host['name']}: Created {len(all_clip_infos)} clip infos for track {track_index}")
+    
+    # Append all clips to the new timeline
+    print(f">>> {host['name']}: Appending {len(all_clip_infos)} clips to new timeline...")
+    items = append_in_chunks(all_clip_infos, mp)
+    
+    if not items:
+        print(f">>> ERROR: No items were appended for {host['name']}")
+        return
+    
+    print(f">>> {host['name']}: Successfully appended {len(items)} clips to track {track_index}")
+    
+    # Disable silence segments
+    disabled_count = 0
+    for i, item in enumerate(items):
+        try:
+            if i < len(all_clip_infos) and all_clip_infos[i].get("is_silence", False):
+                item.SetClipEnabled(False)
+                disabled_count += 1
+        except Exception as e:
+            print(f">>> WARNING: Could not disable silence segment {i}: {e}")
+    
+    print(f">>> {host['name']}: Disabled {disabled_count} silence segments on track {track_index}")
+
+def process_host(tl, mp, host, fps, assigned_track_index, resolve_obj, gap_frames=0):
     """Process a single host with butt-joined speech segments only"""
     
     # Load silence detection results
@@ -247,12 +337,15 @@ def process_host(tl, mp, host, fps, assigned_track_index, resolve_obj):
         print(f">>> ERROR: No original item for {host['name']}")
         return
     
-    # Use the original Media Pool Item
-    original_mpi = original_item.GetMediaPoolItem()
-    if not original_mpi:
+    # Use the compound clip's Media Pool Item directly
+    # The API limitation means only the first host will work, but let's try anyway
+    mpi = original_item.GetMediaPoolItem()
+    if not mpi:
         print(f">>> ERROR: Could not get media pool item for {host['name']}")
         return
-    mpi = original_mpi
+    
+    print(f">>> Using compound clip's Media Pool Item for {host['name']}")
+    print(f">>> Compound clip duration: {original_item.GetEnd() - original_item.GetStart()} frames")
     
     # Duration clamping
     dur_frames = None
@@ -268,10 +361,12 @@ def process_host(tl, mp, host, fps, assigned_track_index, resolve_obj):
         return max(lo, min(v, hi))
     
     orig_start_recF = original_item.GetStart()   # anchor processed track to match timeline start
-    recF = orig_start_recF
+    recF = orig_start_recF + gap_frames  # add gap between hosts
 
     all_clip_infos = []
-    for seg in segs:
+    print(f">>> DEBUG: Processing {len(segs)} segments for {host['name']}")
+    
+    for i, seg in enumerate(segs):
         if "startF" in seg and "endF" in seg:
             sF, eF = int(seg["startF"]), int(seg["endF"])
         else:
@@ -283,7 +378,7 @@ def process_host(tl, mp, host, fps, assigned_track_index, resolve_obj):
         if eF <= sF:
             continue
 
-        all_clip_infos.append({
+        clip_info = {
             "mediaPoolItem": mpi,
             "startFrame": sF,
             "endFrame": eF,
@@ -291,8 +386,18 @@ def process_host(tl, mp, host, fps, assigned_track_index, resolve_obj):
             "recordFrame": recF,          # place immediately after previous segment
             "trackIndex": assigned_track_index,
             "is_silence": seg.get("is_silence", False)  # Store silence flag for later
-        })
+        }
+        all_clip_infos.append(clip_info)
+        
+        # Debug: Print first few and last few clips
+        if i < 3 or i >= len(segs) - 3:
+            print(f">>> DEBUG: Clip {i+1}: {sF}-{eF} frames, record at {recF}, silence={seg.get('is_silence', False)}")
+        
         recF += (eF - sF)
+    
+    print(f">>> DEBUG: Created {len(all_clip_infos)} clip infos for {host['name']}")
+    print(f">>> DEBUG: First clip: {all_clip_infos[0] if all_clip_infos else 'None'}")
+    print(f">>> DEBUG: Last clip: {all_clip_infos[-1] if all_clip_infos else 'None'}")
 
     if not all_clip_infos:
         print(f">>> No segments for {host['name']}")
@@ -302,9 +407,18 @@ def process_host(tl, mp, host, fps, assigned_track_index, resolve_obj):
     silence_count = len([c for c in all_clip_infos if c.get("is_silence", False)])
     print(f">>> Adding {len(all_clip_infos)} total clips ({speech_count} speech, {silence_count} silence) to track {assigned_track_index}...")
     
+    # Debug: Print sample clip data
+    print(f">>> DEBUG: Sample clip data for {host['name']}:")
+    for i, clip in enumerate(all_clip_infos[:3]):
+        print(f">>>   Clip {i+1}: start={clip['startFrame']}, end={clip['endFrame']}, record={clip['recordFrame']}, track={clip['trackIndex']}")
+    
     # Ensure we're on Edit page and track is unlocked
     resolve_obj.OpenPage("edit")
     time.sleep(0.1)
+
+    # Debug: Check track state before append
+    track_items_before = tl.GetItemListInTrack("audio", assigned_track_index) or []
+    print(f">>> DEBUG: Track {assigned_track_index} has {len(track_items_before)} items before append")
 
     # Unlock the destination track
     try:
@@ -315,7 +429,20 @@ def process_host(tl, mp, host, fps, assigned_track_index, resolve_obj):
         print(f">>> Could not check/unlock track {assigned_track_index}: {e}")
 
     # Append all clips in chunks to avoid large batch failures
+    print(f">>> DEBUG: About to append {len(all_clip_infos)} clips to timeline")
+    print(f">>> DEBUG: First few clip infos:")
+    for i, clip in enumerate(all_clip_infos[:3]):
+        print(f">>>   Clip {i+1}: start={clip['startFrame']}, end={clip['endFrame']}, record={clip['recordFrame']}, track={clip['trackIndex']}")
+    
     items = append_in_chunks(all_clip_infos, mp)
+    
+    print(f">>> DEBUG: AppendToTimeline returned {len(items)} items")
+    
+    # Debug: Check track state after append
+    track_items_after = tl.GetItemListInTrack("audio", assigned_track_index) or []
+    print(f">>> DEBUG: Track {assigned_track_index} has {len(track_items_after)} items after append")
+    print(f">>> DEBUG: Net change: +{len(track_items_after) - len(track_items_before)} items")
+    
     print(f">>> {host['name']}: appended {len(items)} total clips to track {assigned_track_index}")
 
     # Disable silence segments and add crossfades
@@ -596,9 +723,7 @@ def main():
         if not os.path.exists(json_path):
             print(f">>> WARNING: {host['name']}.json not found")
     
-    # Create tracks and process hosts
-    
-    # Create all tracks first
+    # Create tracks for processed audio
     track_assignments = {}
     for i, host in enumerate(hosts):
         # Get current track count before adding
@@ -613,29 +738,24 @@ def main():
             print(f">>> ERROR: Failed to create track for {host['name']}")
             return
     
-    # Verify tracks created
-    for host in hosts:
-        assigned_track = track_assignments[host['name']]
-        track_items = tl.GetItemListInTrack("audio", assigned_track) or []
-        print(f">>> Track {assigned_track} ({host['name']}): {len(track_items)} items")
-    
     # Get FPS from timeline settings
     fps = float(proj.GetSetting("timelineFrameRate") or "29.97")
     
-    # Process all hosts
+    # Process each host on their dedicated track
     for i, host in enumerate(hosts):
         print(f">>> Processing {host['name']} ({i+1}/{len(hosts)})")
-        assigned_track = track_assignments[host['name']]
         
-        process_host(tl, mp, host, fps, assigned_track, resolve)
+        # Use the host's dedicated track
+        host_track = track_assignments[host['name']]
+        print(f">>> Using dedicated track {host_track} for {host['name']}")
         
-        # Verify results
-        track_items = tl.GetItemListInTrack("audio", assigned_track) or []
-        print(f">>> {host['name']}: {len(track_items)} clips on track {assigned_track}")
+        # Process this host using the new timeline approach
+        process_host_new_timeline(tl, mp, host, fps, host_track, resolve)
         
         # Brief pause between hosts
         if i < len(hosts) - 1:
-            time.sleep(0.5)
+            print(f">>> Pausing between hosts...")
+            time.sleep(1.0)
     
     # Mute original tracks for A/B comparison
     for host in hosts:
@@ -646,7 +766,11 @@ def main():
             print(f">>> Could not mute track {host['track']}: {e}")
     
     # Final summary
-    print(f">>> Done. Applied silence gating to {len(hosts)} tracks")
+    print(f">>> Done. Applied silence gating to {len(hosts)} hosts")
+    print(f">>> Each host has been processed on their own track with silence segments disabled")
+    
+    # Show track summary
+    print(f">>> Timeline track summary:")
     for i in range(1, tl.GetTrackCount("audio") + 1):
         try:
             name = tl.GetTrackName("audio", i) or f"Track {i}"
