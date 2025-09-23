@@ -119,7 +119,7 @@ def copy_scripts(script_dir):
         "detect_silence.py",
         "Podcast_AudioGate_AllInOne_auto.py",
         "config.py",
-        "AudioOnly_IndividualClips_Render.xml"
+        "AudioOnly_IndividualClips.xml"
     ]
     
     success = True

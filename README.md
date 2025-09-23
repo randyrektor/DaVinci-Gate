@@ -21,6 +21,16 @@ An automated DaVinci Resolve script that intelligently processes podcast audio b
 
 <img width="2542" height="414" alt="Screenshot 2025-09-22 at 10 29 45 AM" src="https://github.com/user-attachments/assets/3d82eda1-75fa-406c-9d0f-743fe7bda250" />
 
+## Quick Start
+
+1. **Clone or download** this repository
+2. **Run the setup script**:
+   ```bash
+   python setup.py
+   ```
+3. **Open DaVinci Resolve** and load your podcast timeline
+4. **Run the script** from Resolve's Scripts menu
+
 ## Installation
 
 ### Quick Setup (Recommended)
@@ -48,7 +58,10 @@ An automated DaVinci Resolve script that intelligently processes podcast audio b
    - **Linux**: `~/.local/share/DaVinciResolve/Fusion/Scripts/Utility/`
 
 4. **Import the render preset**:
-   - Copy `AudioOnly_IndividualClips_Render.xml` to your DaVinci Resolve presets folder
+   - Copy `AudioOnly_IndividualClips.xml` to your DaVinci Resolve presets folder
+   - **macOS**: `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Support/Resolve Disk Database/Resolve Preferences/Export/`
+   - **Windows**: `~/AppData/Roaming/Blackmagic Design/DaVinci Resolve/Support/Resolve Disk Database/Resolve Preferences/Export/`
+   - **Linux**: `~/.local/share/DaVinciResolve/Support/Resolve Disk Database/Resolve Preferences/Export/`
    - Or manually create a render preset with these settings:
      - Format: WAV
      - Audio Codec: LPCM
@@ -60,13 +73,14 @@ An automated DaVinci Resolve script that intelligently processes podcast audio b
 
 1. Open DaVinci Resolve
 2. Load your podcast timeline with audio tracks containing named clips
-3. Run the script from Resolve's Scripts menu
+3. Run `Podcast_AudioGate_AllInOne_auto.py` from Resolve's Scripts menu
 4. The script will automatically:
    - Detect all audio tracks with clips (accepts any track name)
-   - Export individual WAV files
-   - Analyze silence patterns
+   - Export individual WAV files using the AudioOnly_IndividualClips preset
+   - Analyze silence patterns using pydub
    - Create processed tracks with gated audio
-   - Mute original tracks for comparison
+   - Apply crossfades and disable silence segments
+   - Mute original tracks for easy A/B comparison
 
 ## Requirements
 
@@ -81,7 +95,7 @@ An automated DaVinci Resolve script that intelligently processes podcast audio b
 - `Podcast_AudioGate_AllInOne_auto.py`: Main DaVinci Resolve automation script
 - `config.py`: Configuration file with customizable settings
 - `setup.py`: Automated setup script for easy installation
-- `AudioOnly_IndividualClips_Render.xml`: DaVinci Resolve render preset for individual WAV export
+- `AudioOnly_IndividualClips.xml`: DaVinci Resolve render preset for individual WAV export
 - `requirements.txt`: Python dependencies
 
 ## Configuration
@@ -120,6 +134,12 @@ The script creates new tracks named `[Processed] [HostName]` with:
 - Silence segments disabled (muted)
 - Speech segments playing normally
 - Small crossfades for smooth transitions
+
+## Known Limitations
+
+- **Source Patch Limitation**: Due to DaVinci Resolve's internal Source Patch mechanism, only the first host's clips will appear on their assigned track. Subsequent hosts will show 0 clips on their tracks, even though the API reports successful append operations. This is a known limitation of the DaVinci Resolve API when using the same Media Pool Item across multiple tracks.
+
+- **Current Status**: The script includes compound deletion and cleanup logic to help mitigate this issue, but the Source Patch limitation may still affect multiple hosts in some cases.
 
 ## Troubleshooting
 

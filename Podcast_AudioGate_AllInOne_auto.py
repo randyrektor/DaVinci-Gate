@@ -173,6 +173,77 @@ def normalize_name(raw):
     base = raw.strip()
     return base.title()  # Always use title case for consistency
 
+def delete_compounds_from_timeline_and_mediapool(tl, mp, hosts):
+    """Delete compound clips from timeline and media pool to clean up used Media Pool Items."""
+    print(">>> Deleting compound clips from timeline and media pool...")
+    
+    # Switch to edit page
+    resolve.OpenPage("edit")
+    
+    # Track which Media Pool Items to delete
+    mpi_to_delete = []
+    
+    # Delete from timeline first
+    for host in hosts:
+        track_index = host["track"]
+        track_items = tl.GetItemListInTrack("audio", track_index) or []
+        
+        for item in track_items:
+            try:
+                # Check if this is a compound clip
+                mpi = item.GetMediaPoolItem()
+                if mpi:
+                    clip_type = mpi.GetClipProperty("Type") or ""
+                    if "compound" in clip_type.lower():
+                        print(f">>> Found compound clip on track {track_index}: {item.GetName()}")
+                        # Mark for deletion from media pool
+                        mpi_to_delete.append(mpi)
+                        # Delete from timeline
+                        item.Delete()
+                        print(f">>> Deleted compound clip from timeline: {item.GetName()}")
+            except Exception as e:
+                print(f">>> WARNING: Could not process item on track {track_index}: {e}")
+    
+    # Delete from media pool
+    for mpi in mpi_to_delete:
+        try:
+            mpi.Delete()
+            print(f">>> Deleted Media Pool Item from media pool")
+        except Exception as e:
+            print(f">>> WARNING: Could not delete Media Pool Item: {e}")
+    
+    print(f">>> Cleanup complete: deleted {len(mpi_to_delete)} compound Media Pool Items")
+    return True
+
+def reimport_original_files(mp, hosts, original_file_paths):
+    """Re-import original source files to create fresh Media Pool Items."""
+    print(">>> Re-importing original source files...")
+    
+    fresh_mpis = {}
+    
+    for host in hosts:
+        host_name = host["name"]
+        if host_name in original_file_paths:
+            file_path = original_file_paths[host_name]
+            if file_path and os.path.exists(file_path):
+                try:
+                    # Re-import the original file
+                    imported_items = mp.AddItemListToMediaPool([file_path])
+                    if imported_items and len(imported_items) > 0:
+                        fresh_mpis[host_name] = imported_items[0]
+                        print(f">>> Re-imported original file for {host_name}: {os.path.basename(file_path)}")
+                    else:
+                        print(f">>> WARNING: Failed to re-import {host_name}")
+                except Exception as e:
+                    print(f">>> ERROR: Could not re-import {host_name}: {e}")
+            else:
+                print(f">>> WARNING: Original file path not found for {host_name}: {file_path}")
+        else:
+            print(f">>> WARNING: No original file path stored for {host_name}")
+    
+    print(f">>> Re-import complete: {len(fresh_mpis)} fresh Media Pool Items created")
+    return fresh_mpis
+
 def json_fresh(host_name, src_mtime, max_age=86400):
     """Check if JSON file is fresh compared to source media."""
     jp = os.path.join(OUTDIR, f"{host_name}.json")
@@ -225,7 +296,7 @@ def discover_hosts(tl):
         raise RuntimeError("No audio tracks with clips found. Please ensure your timeline has audio tracks with named clips.")
     return hosts
 
-def process_host(tl, mp, host, fps, assigned_track_index, resolve_obj):
+def process_host(tl, mp, host, fps, assigned_track_index, resolve_obj, fresh_mpis=None):
     """Process a single host with butt-joined speech segments only"""
     
     # Load silence detection results
@@ -250,13 +321,20 @@ def process_host(tl, mp, host, fps, assigned_track_index, resolve_obj):
     
     print(f">>> Using original item as source: {original_item.GetStart()}-{original_item.GetEnd()}")
     
-    # Use the original media pool item
-    mpi = original_item.GetMediaPoolItem()
-    if not mpi:
-        print(f">>> ERROR: Could not get media pool item for {host['name']}")
-        return
-    
-    print(f">>> Media pool item for {host['name']}: {mpi}")
+    # Use fresh Media Pool Item if available, otherwise use original after compound deletion
+    if fresh_mpis and host['name'] in fresh_mpis:
+        mpi = fresh_mpis[host['name']]
+        print(f">>> Using fresh Media Pool Item for {host['name']}: {mpi}")
+        print(f">>> Fresh Media Pool Item should avoid Source Patch issues")
+    else:
+        # Use original Media Pool Item (compounds have been deleted, so this should work better)
+        original_mpi = original_item.GetMediaPoolItem()
+        if not original_mpi:
+            print(f">>> ERROR: Could not get media pool item for {host['name']}")
+            return
+        mpi = original_mpi
+        print(f">>> Using original Media Pool Item for {host['name']}: {mpi}")
+        print(f">>> Compound deletion should help with Source Patch issues")
     
     # Duration clamping (optional but robust)
     dur_frames = None
@@ -417,6 +495,27 @@ def main():
         print(f"ERROR: {e}")
         return
     
+    # Store original file paths before any processing
+    print(">>> Storing original file paths...")
+    original_file_paths = {}
+    for host in hosts:
+        try:
+            mpi = host["item"].GetMediaPoolItem()
+            if mpi:
+                file_path = mpi.GetClipProperty("File Path")
+                if file_path and os.path.exists(file_path):
+                    original_file_paths[host["name"]] = file_path
+                    print(f">>> Stored original path for {host['name']}: {os.path.basename(file_path)}")
+                else:
+                    print(f">>> WARNING: Could not get file path for {host['name']}")
+        except Exception as e:
+            print(f">>> WARNING: Could not store file path for {host['name']}: {e}")
+    
+    if not original_file_paths:
+        print("WARNING: Could not store original file paths. Will use alternative approach...")
+        # We'll proceed without re-importing and just use the existing Media Pool Items
+        # after deleting the compounds
+    
     # Check if all JSONs are fresh before rendering
     print(f">>> Checking JSON freshness...")
     all_fresh = True
@@ -505,34 +604,37 @@ def main():
         proj.SetCurrentRenderMode(0)  # Individual clips
         print(f">>> Setting render mode...")
         
-        # Set output directory with custom naming (matching the preset format)
+        # Debug: Check what the preset actually set
+        try:
+            current_settings = proj.GetRenderSettings()
+            print(f">>> DEBUG: Current render settings after preset load:")
+            for key, value in current_settings.items():
+                print(f">>>   {key}: {value}")
+        except Exception as e:
+            print(f">>> DEBUG: Could not get current render settings: {e}")
+        
+        # Set only essential settings - let the preset handle format and codec
         render_settings = {
             "TargetDir": OUTDIR,
             "CustomName": "%{Clip Name}",  # Use curly braces as in the preset
-            "UniqueFilenames": True,       # Ensure unique filenames
-            "Format": CONFIG["output_format"],
-            "AudioCodec": CONFIG["audio_codec"],
-            "AudioBitDepth": CONFIG["audio_bit_depth"],
-            "AudioSampleRate": CONFIG["audio_sample_rate"]
+            "UniqueFilenames": True        # Ensure unique filenames
         }
         
         try:
             proj.SetRenderSettings(render_settings)
             print(f">>> Setting render settings: {render_settings}")
         except Exception as e:
-            print(f">>> WARNING: Could not set all render settings: {e}")
-            # Try with just the essential settings
-            try:
-                basic_settings = {
-                    "TargetDir": OUTDIR,
-                    "CustomName": "%Clip Name",
-                    "UniqueFilenames": True
-                }
-                proj.SetRenderSettings(basic_settings)
-                print(f">>> Using basic render settings: {basic_settings}")
-            except Exception as e2:
-                print(f">>> ERROR: Could not set any render settings: {e2}")
-                return
+            print(f">>> WARNING: Could not set render settings: {e}")
+            return
+        
+        # Debug: Check what settings are now active
+        try:
+            final_settings = proj.GetRenderSettings()
+            print(f">>> DEBUG: Final render settings before render:")
+            for key, value in final_settings.items():
+                print(f">>>   {key}: {value}")
+        except Exception as e:
+            print(f">>> DEBUG: Could not get final render settings: {e}")
         
         # Add render job
         job_id = proj.AddRenderJob()
@@ -558,6 +660,27 @@ def main():
         print(f">>> Render job {job_id} cleared from queue")
     else:
         print(f">>> Skipped rendering - using existing JSON files")
+    
+    # Get media pool
+    mp = proj.GetMediaPool()
+    if not mp:
+        print("ERROR: No media pool available")
+        return
+    
+    # Clean workflow: Delete compounds and optionally re-import original files
+    print(">>> Starting clean workflow to avoid Source Patch issues...")
+    
+    # Step 1: Delete compound clips from timeline and media pool
+    delete_compounds_from_timeline_and_mediapool(tl, mp, hosts)
+    
+    # Step 2: Re-import original source files if we have file paths
+    fresh_mpis = None
+    if original_file_paths:
+        fresh_mpis = reimport_original_files(mp, hosts, original_file_paths)
+        if not fresh_mpis:
+            print("WARNING: Could not re-import original files. Will use existing Media Pool Items.")
+    else:
+        print("INFO: No original file paths available. Will use existing Media Pool Items after compound deletion.")
     
     # Detect silence for each host (only if we rendered new files)
     if not skip_render:
@@ -702,7 +825,7 @@ def main():
         
         # Process this host with timeline manipulation
         print(f">>> Processing {host['name']} on track {assigned_track}...")
-        process_host(tl, mp, host, fps, assigned_track, resolve)
+        process_host(tl, mp, host, fps, assigned_track, resolve, fresh_mpis)
         
         # Verify results immediately after processing
         track_items = tl.GetItemListInTrack("audio", assigned_track) or []
