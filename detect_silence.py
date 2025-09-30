@@ -4,16 +4,12 @@ import os, sys, json
 
 def detect_silence(wav_path, min_sil_ms=600, pad_ms=120, out_json=None, silence_thresh_db=-50.0, fps_hint=30):
     """Detect silence segments in audio file and return segments list."""
-    print(f"detect_silence: Processing {wav_path}")
-    print(f"detect_silence: Parameters - min_sil_ms={min_sil_ms}, pad_ms={pad_ms}, out_json={out_json}, silence_thresh_db={silence_thresh_db}")
-    
     if not os.path.exists(wav_path):
         print(f"detect_silence: ERROR - File does not exist: {wav_path}")
         return []
     
     try:
         a = AudioSegment.from_file(wav_path)
-        print(f"detect_silence: Loaded audio - duration: {len(a)}ms")
     except Exception as e:
         print(f"detect_silence: ERROR loading audio file: {e}")
         return []
@@ -58,22 +54,12 @@ def detect_silence(wav_path, min_sil_ms=600, pad_ms=120, out_json=None, silence_
         segs.append({"start_sec": s/1000.0, "end_sec": e/1000.0, "is_silence": is_silence})
     
     if out_json:
-        print(f"detect_silence: Writing JSON to {out_json}")
         try:
             with open(out_json, "w") as f:
                 json.dump(segs, f, indent=2)
             
-            # Verify file was created
-            if os.path.exists(out_json):
-                file_size = os.path.getsize(out_json)
-                print(f"detect_silence: SUCCESS - Created {out_json} ({file_size} bytes)")
-            else:
+            if not os.path.exists(out_json):
                 print(f"detect_silence: ERROR - Failed to create {out_json}")
-            
-            # Debug output
-            speech_segs = [s for s in segs if not s["is_silence"]]
-            silence_segs = [s for s in segs if s["is_silence"]]
-            print(f"detect_silence: {len(speech_segs)} speech segments, {len(silence_segs)} silence segments")
         except Exception as e:
             print(f"detect_silence: ERROR writing JSON file: {e}")
             import traceback

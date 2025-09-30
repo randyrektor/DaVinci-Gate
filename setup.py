@@ -100,11 +100,39 @@ def check_ffmpeg():
         print("✓ ffmpeg is available")
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
-        print("✗ ffmpeg not found - please install ffmpeg")
+        print("⚠ ffmpeg not found - pydub will attempt to use system audio libraries")
+        print("  For best performance, install ffmpeg:")
         print("  macOS: brew install ffmpeg")
         print("  Windows: Download from https://ffmpeg.org/download.html")
         print("  Linux: sudo apt install ffmpeg (Ubuntu/Debian)")
-        return False
+        print("  The script will still work without ffmpeg, but may show warnings")
+        return True  # Don't fail setup if ffmpeg is missing
+
+def find_preset_directory():
+    """Find the DaVinci Resolve preset directory."""
+    platform_name = get_platform_info()
+    
+    if platform_name == "macos":
+        preset_paths = [
+            os.path.expanduser("~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Support/Resolve Disk Database/Resolve Preferences/Export/"),
+        ]
+    elif platform_name == "windows":
+        preset_paths = [
+            os.path.expanduser("~/AppData/Roaming/Blackmagic Design/DaVinci Resolve/Support/Resolve Disk Database/Resolve Preferences/Export/"),
+        ]
+    elif platform_name == "linux":
+        preset_paths = [
+            os.path.expanduser("~/.local/share/DaVinciResolve/Support/Resolve Disk Database/Resolve Preferences/Export/"),
+        ]
+    else:
+        return None
+    
+    for path in preset_paths:
+        if os.path.exists(path):
+            return path
+    
+    # If directory doesn't exist, return the first expected path
+    return preset_paths[0] if preset_paths else None
 
 def copy_scripts(script_dir):
     """Copy scripts to the DaVinci Resolve script directory."""
@@ -118,8 +146,7 @@ def copy_scripts(script_dir):
     files_to_copy = [
         "detect_silence.py",
         "Podcast_AudioGate_AllInOne_auto.py",
-        "config.py",
-        "AudioOnly_IndividualClips.xml"
+        "config.py"
     ]
     
     success = True
@@ -138,6 +165,29 @@ def copy_scripts(script_dir):
     
     return success
 
+def copy_preset(preset_dir):
+    """Copy render preset to the DaVinci Resolve preset directory."""
+    if not preset_dir:
+        print("✗ Could not determine preset directory")
+        return False
+    
+    # Create directory if it doesn't exist
+    os.makedirs(preset_dir, exist_ok=True)
+    
+    preset_file = "AudioOnly_IndividualClips.xml"
+    if os.path.exists(preset_file):
+        dest_path = os.path.join(preset_dir, preset_file)
+        try:
+            shutil.copy2(preset_file, dest_path)
+            print(f"✓ Copied {preset_file} to {dest_path}")
+            return True
+        except Exception as e:
+            print(f"✗ Failed to copy {preset_file}: {e}")
+            return False
+    else:
+        print(f"✗ {preset_file} not found in current directory")
+        return False
+
 def main():
     """Main setup function."""
     print("DaVinci Resolve Podcast Audio Gate Setup")
@@ -152,10 +202,8 @@ def main():
         print("Setup failed - could not install dependencies")
         return False
     
-    # Check ffmpeg
-    if not check_ffmpeg():
-        print("Setup failed - ffmpeg is required")
-        return False
+    # Check ffmpeg (optional)
+    check_ffmpeg()
     
     # Find script directory
     script_dir = find_script_directory()
@@ -171,17 +219,29 @@ def main():
         print("Setup failed - could not copy scripts")
         return False
     
+    # Find and copy render preset
+    preset_dir = find_preset_directory()
+    if preset_dir:
+        print(f"Preset directory: {preset_dir}")
+        if not copy_preset(preset_dir):
+            print("⚠ Warning: Could not copy render preset - you may need to install it manually")
+    else:
+        print("⚠ Warning: Could not find preset directory - you may need to install the preset manually")
+    
     print("\n✓ Setup completed successfully!")
     print("\nNext steps:")
     print("1. Open DaVinci Resolve")
     print("2. Go to Workspace > Scripts > Utility")
     print("3. Run 'Podcast_AudioGate_AllInOne_auto'")
     print("\nIMPORTANT USAGE NOTES:")
-    print("• For best results, place all compound clips on a single audio track")
-    print("• The script processes one source track at a time")
-    print("• For multiple tracks, process them separately and combine results")
-    print("• See README.md for detailed usage patterns and workarounds")
+    print("• Place your audio tracks with compound clips in DaVinci Resolve")
+    print("• The script automatically detects tracks and processes them")
+    print("• Uses compound processing for optimal performance")
+    print("• Creates processed tracks with silence segments disabled")
+    print("• See README.md for detailed usage instructions")
     print("\nTo customize settings, edit the config.py file in the script directory")
+    print("• All configuration options are available in config.py")
+    print("• No need to manually select render presets - script handles this automatically")
     
     return True
 

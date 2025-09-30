@@ -11,11 +11,7 @@ import json
 import time
 import glob
 import shutil
-import subprocess
-import gc
 import tempfile
-import re
-from concurrent.futures import ThreadPoolExecutor
 
 # Add the detect_silence script to path
 try:
@@ -35,7 +31,6 @@ possible_paths = [
 for path in possible_paths:
     if os.path.exists(os.path.join(path, "detect_silence.py")):
         sys.path.insert(0, path)
-        print(f">>> Found detect_silence.py in: {path}")
         break
 else:
     print("ERROR: Could not find detect_silence.py in any of these locations:")
@@ -94,28 +89,43 @@ RENDER_PRESET = "AudioOnly_IndividualClips"
 
 # Load configuration
 try:
-    from config import *
+    # Try to import from the same directory as this script
+    import sys
+    import os
+    
+    # Get the directory where this script is located
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        # __file__ not available in DaVinci Resolve, use script_dir from earlier
+        script_dir = os.path.dirname(os.path.abspath(sys.argv[0])) if sys.argv else os.getcwd()
+    
+    # Add script directory to Python path
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    
+    import config
     CONFIG = {
-        "render_preset": RENDER_PRESET,
-        "output_format": OUTPUT_FORMAT,
-        "audio_codec": AUDIO_CODEC,
-        "audio_bit_depth": AUDIO_BIT_DEPTH,
-        "audio_sample_rate": AUDIO_SAMPLE_RATE,
-        "silence_threshold_db": SILENCE_THRESHOLD_DB,
-        "min_silence_ms": MIN_SILENCE_MS,
-        "padding_ms": PADDING_MS,
-        "hold_ms": HOLD_MS,
-        "crossfade_ms": CROSSFADE_MS,
-        "batch_size": BATCH_SIZE,
-        "fps_hint": FPS_HINT,
-        "script_dir": SCRIPT_DIR,
-        "temp_dir": TEMP_DIR,
+        "render_preset": config.RENDER_PRESET,
+        "output_format": config.OUTPUT_FORMAT,
+        "audio_codec": config.AUDIO_CODEC,
+        "audio_bit_depth": config.AUDIO_BIT_DEPTH,
+        "audio_sample_rate": config.AUDIO_SAMPLE_RATE,
+        "silence_threshold_db": config.SILENCE_THRESHOLD_DB,
+        "min_silence_ms": config.MIN_SILENCE_MS,
+        "padding_ms": config.PADDING_MS,
+        "hold_ms": config.HOLD_MS,
+        "crossfade_ms": config.CROSSFADE_MS,
+        "batch_size": config.BATCH_SIZE,
+        "fps_hint": config.FPS_HINT,
+        "script_dir": config.SCRIPT_DIR,
+        "temp_dir": config.TEMP_DIR,
         "track_name_normalize": True,
-        "use_compound_processing": True,  # Set to True to use compound processing approach
+        "use_compound_processing": True,
     }
     print(">>> Loaded configuration from config.py")
-except ImportError:
-    # Fallback configuration if config.py is not found
+except ImportError as e:
+    # Default configuration
     CONFIG = {
         "render_preset": "AudioOnly_IndividualClips",
         "output_format": "wav",
@@ -132,9 +142,9 @@ except ImportError:
         "script_dir": None,
         "temp_dir": None,
         "track_name_normalize": True,
-        "use_compound_processing": True,  # Set to True to use compound processing approach
+        "use_compound_processing": True,
     }
-    print(">>> Using default configuration (config.py not found)")
+    print(f">>> Using default configuration (config import failed: {e})")
 
 def which(x): 
     """Check if executable exists in PATH."""
@@ -143,10 +153,10 @@ def which(x):
 # Suppress pydub's ffmpeg warning since it's just informational
 import warnings
 warnings.filterwarnings("ignore", message="Couldn't find ffmpeg or avconv")
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="pydub")
 
-# Since pydub is already working (as evidenced by the warning), we'll skip the strict check
-# and let pydub handle ffmpeg detection. The warning just means it had to guess the path.
-print(">>> Using pydub's ffmpeg detection (may show warning but will work)")
+# Let pydub handle ffmpeg detection
+print(">>> Using pydub's ffmpeg detection")
 
 # Use temporary directory for safer handling
 if CONFIG["temp_dir"]:
@@ -154,7 +164,7 @@ if CONFIG["temp_dir"]:
     os.makedirs(OUTDIR, exist_ok=True)
 else:
     OUTDIR = tempfile.mkdtemp(prefix="_temp_gate_")
-print(f">>> Using temporary directory: {OUTDIR}")
+print(f">>> Using temporary directory")
 
 def s2f(seconds, fps):
     """Convert seconds to frames."""
@@ -165,7 +175,7 @@ def f2s(frames, fps):
     return frames / fps
 
 def refresh_handles(resolve_obj):
-    """Refresh object handles to stabilize the API layer."""
+    """Refresh object handles to stabilize the API."""
     resolve_obj.OpenPage("edit")
     time.sleep(0.5)
     p = resolve_obj.GetProjectManager().GetCurrentProject()
@@ -181,7 +191,7 @@ def refresh_handles(resolve_obj):
 
 def normalize_name(raw):
     base = raw.strip()
-    return base.title()  # Always use title case for consistency
+    return base.title()
 
 def json_fresh(host_name, src_mtime, max_age=86400):
     """Check if JSON file is fresh compared to source media."""
@@ -195,9 +205,7 @@ def append_in_chunks(infos, mp, size=None):
     out = []
     for i in range(0, len(infos), size):
         chunk = infos[i:i+size]
-        print(f">>> DEBUG: Appending chunk {i//size + 1}/{(len(infos) + size - 1)//size} with {len(chunk)} items")
         result = mp.AppendToTimeline(chunk) or []
-        print(f">>> DEBUG: AppendToTimeline returned {len(result)} items for this chunk")
         out.extend(result)
         print(f">>> Appended chunk {i//size + 1}/{(len(infos) + size - 1)//size} ({len(chunk)} items)")
     return out
@@ -258,23 +266,18 @@ def append_from_compound(item, dst_idx, segs, fps, mp):
     # Get compound clip duration
     try: 
         durF = int(float(mpi.GetClipProperty("Frames") or 0))
-        print(f">>> DEBUG: Compound clip duration: {durF} frames")
     except: 
         durF = 0
-        print(f">>> DEBUG: Could not get compound clip duration, using 0")
     
     anchor = int(item.GetStart())  # compound's current timeline start
     recF = anchor
     infos = []
-    
-    print(f">>> DEBUG: Processing {len(segs)} segments for track {dst_idx}")
     
     for i, (sF, eF, isSil) in enumerate(segs):
         if durF:  # clamp if we know length
             sF = max(0, min(sF, durF-1))
             eF = max(0, min(eF, durF))
             if eF <= sF: 
-                print(f">>> DEBUG: Skipping segment {i} (clamped to zero length)")
                 continue
         
         clip_info = {
@@ -289,25 +292,16 @@ def append_from_compound(item, dst_idx, segs, fps, mp):
         }
         infos.append(clip_info)
         recF += (eF - sF)  # butt-join
-        
-        # Debug first few segments
-        if i < 3:
-            print(f">>> DEBUG: Segment {i+1}: {sF}-{eF} frames, record at {recF-(eF-sF)}, silence={isSil}")
     
     if not infos: 
         print(">>> ERROR: No valid segments to append")
         return []
     
-    print(f">>> DEBUG: Created {len(infos)} clip infos for AppendToTimeline")
-    print(f">>> DEBUG: Sample payload: {infos[0] if infos else 'None'}")
-    
-    # Try to append to timeline
     try:
         result = mp.AppendToTimeline(infos)
         if result is None:
             print(">>> ERROR: AppendToTimeline returned None")
             return []
-        print(f">>> DEBUG: AppendToTimeline returned {len(result)} items")
         return result
     except Exception as e:
         print(f">>> ERROR: AppendToTimeline failed: {e}")
@@ -325,32 +319,19 @@ def process_compound_clips(tl, mp, proj, fps, hosts):
             hosts_by_track[src_idx] = []
         hosts_by_track[src_idx].append(host)
     
-    print(f">>> Found hosts on {len(hosts_by_track)} source tracks: {list(hosts_by_track.keys())}")
-    
-    # Get current track count
+    # Get current track count and ensure we have enough destination tracks
     current_track_count = tl.GetTrackCount("audio")
-    print(f">>> Current audio track count: {current_track_count}")
-    
-    # Ensure we have enough destination tracks (one per source track)
     needed_tracks = current_track_count + len(hosts_by_track)
     while tl.GetTrackCount("audio") < needed_tracks:
         tl.AddTrack("audio")
-    print(f">>> Ensured {needed_tracks} total audio tracks exist")
     
     # Process each source track
     for i, (src_idx, track_hosts) in enumerate(hosts_by_track.items()):
         dst_idx = current_track_count + i + 1
         
-        print(f">>> Processing {len(track_hosts)} hosts from track {src_idx} to track {dst_idx}")
-        print(f">>> Hosts: {[h['name'] for h in track_hosts]}")
+        print(f">>> Processing {len(track_hosts)} hosts to track {dst_idx}")
         
-        # Unlock destination track
-        try:
-            if tl.GetTrackLockState("audio", dst_idx):
-                tl.SetTrackLockState("audio", dst_idx, False)
-                print(f">>> Unlocked track {dst_idx}")
-        except Exception as e:
-            print(f">>> Could not manage track lock for {dst_idx}: {e}")
+        # Ensure destination track is accessible
         
         # Get all compound clips from source track
         items = tl.GetItemListInTrack("audio", src_idx) or []
@@ -436,19 +417,10 @@ def process_compound_clips(tl, mp, proj, fps, hosts):
         
         print(f">>> Created {len(all_clip_infos)} total clip infos for track {dst_idx}")
         
-        # Debug: Check track state before append
-        track_items_before = tl.GetItemListInTrack("audio", dst_idx) or []
-        print(f">>> DEBUG: Track {dst_idx} has {len(track_items_before)} items before append")
-        
         # Append all segments in one call
         print(f">>> Appending {len(all_clip_infos)} clips to track {dst_idx}...")
         added = append_in_chunks(all_clip_infos, mp)
         print(f">>> AppendToTimeline returned {len(added)} items for track {dst_idx}")
-        
-        # Debug: Check track state after append
-        track_items_after = tl.GetItemListInTrack("audio", dst_idx) or []
-        print(f">>> DEBUG: Track {dst_idx} has {len(track_items_after)} items after append")
-        print(f">>> DEBUG: Net change: +{len(track_items_after) - len(track_items_before)} items")
         
         if not added:
             print(f">>> WARNING: No items were appended for track {src_idx} - this may indicate an API issue")
@@ -503,11 +475,8 @@ def process_host_new_timeline(tl, mp, host, fps, track_index, resolve_obj):
     
     # Create a new track for this host instead of managing existing ones
     try:
-        print(f">>> DEBUG: Creating new track for {host['name']}")
-        
         # Get current track count before adding
         current_track_count = tl.GetTrackCount("audio")
-        print(f">>> DEBUG: Current track count: {current_track_count}")
         
         success = tl.AddTrack("audio")
         if not success:
@@ -516,27 +485,18 @@ def process_host_new_timeline(tl, mp, host, fps, track_index, resolve_obj):
         
         # The new track will be at current_track_count + 1
         new_track_index = current_track_count + 1
-        print(f">>> DEBUG: Created track {new_track_index} for {host['name']}")
         
-        # Try to set track name (may fail but that's ok)
+        # Try to set track name
         try:
             tl.SetTrackName("audio", new_track_index, f"[Processed] {host['name']}")
-            print(f">>> DEBUG: Set track name for {host['name']}")
         except Exception as e:
             print(f">>> WARNING: Could not set track name for {host['name']}: {e}")
         
-        # Try to ensure track is unlocked (may fail but that's ok)
-        try:
-            if tl.GetTrackLockState("audio", new_track_index):
-                tl.SetTrackLockState("audio", new_track_index, False)
-                print(f">>> DEBUG: Unlocked track for {host['name']}")
-        except Exception as e:
-            print(f">>> WARNING: Could not manage track lock for {host['name']}: {e}")
+        # Track should be accessible by default
             
         # Update track_index to use the new track
         track_index = new_track_index
-        print(f">>> DEBUG: Using track {track_index} for {host['name']}")
-        
+    
     except Exception as e:
         print(f">>> ERROR: Could not create track for {host['name']}: {e}")
         return
@@ -601,7 +561,7 @@ def process_host_new_timeline(tl, mp, host, fps, track_index, resolve_obj):
             "recordFrame": recF,
             "trackIndex": track_index,
             "mediaType": 2,  # Audio
-            "trackType": "audio",  # Critical fix - tells Resolve it's audio
+            "trackType": "audio",
             "is_silence": is_silence
         }
         all_clip_infos.append(clip_info)
@@ -609,22 +569,12 @@ def process_host_new_timeline(tl, mp, host, fps, track_index, resolve_obj):
     
     print(f">>> {host['name']}: Created {len(all_clip_infos)} clip infos for track {track_index}")
     
-    # Debug: Check track state before append
-    track_items_before = tl.GetItemListInTrack("audio", track_index) or []
-    print(f">>> DEBUG: Track {track_index} has {len(track_items_before)} items before append")
-    
     # Append all clips to the new timeline
     print(f">>> {host['name']}: Appending {len(all_clip_infos)} clips to new timeline...")
     items = append_in_chunks(all_clip_infos, mp)
     
-    # Debug: Check track state after append
-    track_items_after = tl.GetItemListInTrack("audio", track_index) or []
-    print(f">>> DEBUG: Track {track_index} has {len(track_items_after)} items after append")
-    print(f">>> DEBUG: Net change: +{len(track_items_after) - len(track_items_before)} items")
-    
     if not items:
         print(f">>> ERROR: No items were appended for {host['name']}")
-        print(f">>> DEBUG: AppendToTimeline returned empty list - this may indicate API issues")
         return
     
     print(f">>> {host['name']}: Successfully appended {len(items)} clips to track {track_index}")
@@ -690,7 +640,6 @@ def process_host(tl, mp, host, fps, assigned_track_index, resolve_obj, gap_frame
     recF = orig_start_recF + gap_frames  # add gap between hosts
 
     all_clip_infos = []
-    print(f">>> DEBUG: Processing {len(segs)} segments for {host['name']}")
     
     for i, seg in enumerate(segs):
         if "startF" in seg and "endF" in seg:
@@ -714,16 +663,7 @@ def process_host(tl, mp, host, fps, assigned_track_index, resolve_obj, gap_frame
             "is_silence": seg.get("is_silence", False)  # Store silence flag for later
         }
         all_clip_infos.append(clip_info)
-        
-        # Debug: Print first few and last few clips
-        if i < 3 or i >= len(segs) - 3:
-            print(f">>> DEBUG: Clip {i+1}: {sF}-{eF} frames, record at {recF}, silence={seg.get('is_silence', False)}")
-        
         recF += (eF - sF)
-    
-    print(f">>> DEBUG: Created {len(all_clip_infos)} clip infos for {host['name']}")
-    print(f">>> DEBUG: First clip: {all_clip_infos[0] if all_clip_infos else 'None'}")
-    print(f">>> DEBUG: Last clip: {all_clip_infos[-1] if all_clip_infos else 'None'}")
 
     if not all_clip_infos:
         print(f">>> No segments for {host['name']}")
@@ -733,41 +673,14 @@ def process_host(tl, mp, host, fps, assigned_track_index, resolve_obj, gap_frame
     silence_count = len([c for c in all_clip_infos if c.get("is_silence", False)])
     print(f">>> Adding {len(all_clip_infos)} total clips ({speech_count} speech, {silence_count} silence) to track {assigned_track_index}...")
     
-    # Debug: Print sample clip data
-    print(f">>> DEBUG: Sample clip data for {host['name']}:")
-    for i, clip in enumerate(all_clip_infos[:3]):
-        print(f">>>   Clip {i+1}: start={clip['startFrame']}, end={clip['endFrame']}, record={clip['recordFrame']}, track={clip['trackIndex']}")
-    
     # Ensure we're on Edit page and track is unlocked
     resolve_obj.OpenPage("edit")
     time.sleep(0.1)
 
-    # Debug: Check track state before append
-    track_items_before = tl.GetItemListInTrack("audio", assigned_track_index) or []
-    print(f">>> DEBUG: Track {assigned_track_index} has {len(track_items_before)} items before append")
-
-    # Unlock the destination track
-    try:
-        if tl.GetTrackLockState("audio", assigned_track_index):
-            print(f">>> WARNING: Track {assigned_track_index} is locked! Unlocking…")
-            tl.SetTrackLockState("audio", assigned_track_index, False)
-    except Exception as e:
-        print(f">>> Could not check/unlock track {assigned_track_index}: {e}")
+    # Ensure track is accessible
 
     # Append all clips in chunks to avoid large batch failures
-    print(f">>> DEBUG: About to append {len(all_clip_infos)} clips to timeline")
-    print(f">>> DEBUG: First few clip infos:")
-    for i, clip in enumerate(all_clip_infos[:3]):
-        print(f">>>   Clip {i+1}: start={clip['startFrame']}, end={clip['endFrame']}, record={clip['recordFrame']}, track={clip['trackIndex']}")
-    
     items = append_in_chunks(all_clip_infos, mp)
-    
-    print(f">>> DEBUG: AppendToTimeline returned {len(items)} items")
-    
-    # Debug: Check track state after append
-    track_items_after = tl.GetItemListInTrack("audio", assigned_track_index) or []
-    print(f">>> DEBUG: Track {assigned_track_index} has {len(track_items_after)} items after append")
-    print(f">>> DEBUG: Net change: +{len(track_items_after) - len(track_items_before)} items")
     
     print(f">>> {host['name']}: appended {len(items)} total clips to track {assigned_track_index}")
 
@@ -788,7 +701,7 @@ def process_host(tl, mp, host, fps, assigned_track_index, resolve_obj, gap_frame
                     item.SetClipEnabled(False)
                     disabled_count += 1
                 except:
-                    # Fallback method
+                    # Alternative method
                     try:
                         item.SetProperty("Enabled", False)
                         disabled_count += 1
@@ -831,9 +744,7 @@ def create_segmented_tracks(tl, mp, hosts, fps, track_assignments=None):
         print(f">>> Created new track at index {new_track_index}")
         
         # Duplicate the original item to the new track
-        # This is a simplified approach - in practice, you might need to use Resolve's copy/paste API
-        print(f">>> WARNING: Track duplication not fully implemented - need to copy original item to track {new_track_index}")
-        print(f">>> For now, the track is created but empty - timeline manipulation approach needs completion")
+        # Track duplication not implemented - placeholder for future enhancement
         
         # Update track assignments
         if track_assignments:
@@ -867,95 +778,73 @@ def main():
         return
     
     
-    # Check if all JSONs are fresh before rendering
-    print(f">>> Checking JSON freshness...")
-    all_fresh = True
-    source_mtimes = {}
+    # Always render fresh audio files
+    # Switch to deliver page
+    resolve.OpenPage("deliver")
+    print(f">>> Current page: {resolve.GetCurrentPage()}")
     
-    for host in hosts:
-        # Get source media modification time
-        try:
-            mpi = host["item"].GetMediaPoolItem()
-            if mpi:
-                # Try to get file path from media pool item
-                file_path = mpi.GetClipProperty("File Path")
-                if file_path and os.path.exists(file_path):
-                    src_mtime = os.path.getmtime(file_path)
-                    source_mtimes[host['name']] = src_mtime
-                    fresh = json_fresh(host['name'], src_mtime)
-                    print(f">>> {host['name']}: JSON fresh = {fresh} (source: {src_mtime}, max_age: 86400s)")
-                    if not fresh:
-                        all_fresh = False
-                else:
-                    print(f">>> {host['name']}: Could not get source file path, will re-render")
-                    all_fresh = False
-            else:
-                print(f">>> {host['name']}: Could not get media pool item, will re-render")
-                all_fresh = False
-        except Exception as e:
-            print(f">>> {host['name']}: Error checking freshness: {e}, will re-render")
-            all_fresh = False
+    # Re-fetch fresh handles after page change
+    proj = resolve.GetProjectManager().GetCurrentProject()
+    tl = proj.GetCurrentTimeline()
+    mp = proj.GetMediaPool()
     
-    if all_fresh:
-        print(f">>> All JSONs are fresh! Skipping render phase...")
-        skip_render = True
-    else:
-        print(f">>> Some JSONs are stale or missing. Proceeding with render...")
-        skip_render = False
+    # Load render preset
+    render_preset = CONFIG["render_preset"]
+    print(f">>> Loading render preset: {render_preset}")
     
-    if not skip_render:
-        # Switch to deliver page
-        resolve.OpenPage("deliver")
-        print(f">>> Current page: {resolve.GetCurrentPage()}")
-        
-        # Re-fetch fresh handles after page change
-        proj = resolve.GetProjectManager().GetCurrentProject()
-        tl = proj.GetCurrentTimeline()
-        mp = proj.GetMediaPool()
-        
-        # Load render preset
-        render_preset = CONFIG["render_preset"]
-        print(f">>> Loading render preset: {render_preset}")
-        
+    # Try different methods to activate the preset
+    preset_activated = False
+    try:
         proj.LoadRenderPreset(render_preset)
-        
-        # Set render mode
-        proj.SetCurrentRenderMode(0)  # Individual clips
-        print(f">>> Setting render mode...")
-        
-        # Set only the target directory - let the preset handle everything else
+        preset_activated = True
+        print(f">>> Loaded render preset: {render_preset}")
+    except Exception as e:
+        print(f">>> WARNING: Could not load render preset '{render_preset}': {e}")
+    
+    # Try alternative method to set current preset
+    if not preset_activated:
         try:
-            proj.SetRenderSettings({"TargetDir": OUTDIR})
-            print(f">>> Set target directory: {OUTDIR}")
+            # Some versions might use SetCurrentRenderPreset
+            proj.SetCurrentRenderPreset(render_preset)
+            preset_activated = True
+            print(f">>> Set current render preset: {render_preset}")
         except Exception as e:
-            print(f">>> WARNING: Could not set target directory: {e}")
-            return
-        
-        
-        # Add render job
-        job_id = proj.AddRenderJob()
-        if not job_id:
-            print("ERROR: Could not create render job")
-            return
-        
-        print(f">>> Render job created: {job_id}")
-        
-        # Start rendering
-        print(f">>> Starting render...")
-        proj.StartRendering()
-        
-        # Wait for render to complete
-        print(f">>> Waiting for render to complete...")
-        while proj.IsRenderingInProgress():
-            time.sleep(1)
-        
-        print(f">>> Render complete -> {OUTDIR}")
-        
-        # Clear render job
-        proj.DeleteRenderJob(job_id)
-        print(f">>> Render job {job_id} cleared from queue")
-    else:
-        print(f">>> Skipped rendering - using existing JSON files")
+            print(f">>> WARNING: Could not set current render preset '{render_preset}': {e}")
+    
+    if not preset_activated:
+        print(f">>> WARNING: Render preset activation failed - using current preset")
+    
+    # Set render mode to individual clips
+    proj.SetCurrentRenderMode(0)
+    print(f">>> Set render mode to individual clips")
+    
+    # Set only the target directory - let the preset handle everything else
+    try:
+        proj.SetRenderSettings({"TargetDir": OUTDIR})
+    except Exception as e:
+        print(f">>> WARNING: Could not set target directory")
+        return
+    
+    
+    # Add render job
+    job_id = proj.AddRenderJob()
+    if not job_id:
+        print("ERROR: Could not create render job")
+        return
+    
+    # Start rendering
+    print(f">>> Starting render...")
+    proj.StartRendering()
+    
+    # Wait for render to complete
+    print(f">>> Waiting for render to complete...")
+    while proj.IsRenderingInProgress():
+        time.sleep(1)
+    
+    print(f">>> Render complete")
+    
+    # Clear render job
+    proj.DeleteRenderJob(job_id)
     
     # Get media pool
     mp = proj.GetMediaPool()
@@ -963,99 +852,81 @@ def main():
         print("ERROR: No media pool available")
         return
     
-    # Detect silence for each host (only if we rendered new files)
-    if not skip_render:
-        print(f">>> Checking for exported WAV files in: {OUTDIR}")
+    # Detect silence for each host
+    print(f">>> Checking for exported WAV files...")
+    
+    all_wav_files = glob.glob(os.path.join(OUTDIR, "*.wav"))
+    print(f">>> Found {len(all_wav_files)} WAV files")
+    
+    # Collect individual WAV files for each host
+    print(f">>> Processing {len(hosts)} hosts...")
+    per_host_wavs = []
+    for host in hosts:
+        wav_file = None
+        patterns_to_try = [
+            f"{host['clip']}.wav",                    # Expected: [TrackName].wav
+            f"{host['clip']}00000000.wav",            # Actual: [TrackName]00000000.wav
+            f"{host['name']}.wav",                    # Alternative: [NormalizedName].wav
+            f"{host['name']}00000000.wav"             # Alternative: [NormalizedName]00000000.wav
+        ]
         
-        all_wav_files = glob.glob(os.path.join(OUTDIR, "*.wav"))
-        print(f">>> Found {len(all_wav_files)} WAV files")
+        for pattern in patterns_to_try:
+            candidate = os.path.join(OUTDIR, pattern)
+            if os.path.exists(candidate):
+                wav_file = candidate
+                break
         
-        # Collect individual WAV files for each host
-        per_host_wavs = []
-        for host in hosts:
-            print(f">>> Processing {host['name']}...")
-            
-            wav_file = None
-            patterns_to_try = [
-                f"{host['clip']}.wav",                    # Expected: [TrackName].wav
-                f"{host['clip']}00000000.wav",            # Actual: [TrackName]00000000.wav
-                f"{host['name']}.wav",                    # Fallback: [NormalizedName].wav
-                f"{host['name']}00000000.wav"             # Fallback: [NormalizedName]00000000.wav
-            ]
-            
-            for pattern in patterns_to_try:
-                candidate = os.path.join(OUTDIR, pattern)
-                if os.path.exists(candidate):
-                    wav_file = candidate
-                    break
-            
-            if not wav_file:
-                print(f">>> ERROR: No WAV file found for {host['name']}")
-                print(f">>> Tried patterns: {patterns_to_try}")
-                print(f">>> Available WAV files: {[os.path.basename(f) for f in all_wav_files]}")
-                continue
-            
-            print(f">>> Found: {os.path.basename(wav_file)}")
-            per_host_wavs.append((host, wav_file))
+        if not wav_file:
+            print(f">>> ERROR: No WAV file found for {host['name']}")
+            print(f">>> Tried patterns: {patterns_to_try}")
+            print(f">>> Available WAV files: {[os.path.basename(f) for f in all_wav_files]}")
+            continue
         
-        # Process silence detection using exported WAV files
-        if per_host_wavs:
-            print(f">>> Running silence detection on {len(per_host_wavs)} files...")
+        per_host_wavs.append((host, wav_file))
+    
+    # Process silence detection using exported WAV files
+    if per_host_wavs:
+        print(f">>> Running silence detection on {len(per_host_wavs)} files...")
+        
+        successful = 0
+        for host, wav_file in per_host_wavs:
+            json_path = os.path.join(OUTDIR, f"{host['name']}.json")
             
-            successful = 0
-            for host, wav_file in per_host_wavs:
-                json_path = os.path.join(OUTDIR, f"{host['name']}.json")
+            try:
+                print(f">>> [{host['name']}] Analyzing: {os.path.basename(wav_file)}")
                 
-                try:
-                    print(f">>> [{host['name']}] Analyzing: {os.path.basename(wav_file)}")
-                    
-                    # Process the WAV file
-                    result = detect_silence(
-                        wav_file, 
-                        min_sil_ms=CONFIG["min_silence_ms"],
-                        pad_ms=CONFIG["padding_ms"],
-                        out_json=json_path,
-                        silence_thresh_db=CONFIG["silence_threshold_db"],
-                        fps_hint=CONFIG["fps_hint"]
-                    )
-                    print(f">>> [{host['name']}] Found {len(result) if result else 'None'} segments")
-                    
-                    if os.path.exists(json_path):
-                        file_size = os.path.getsize(json_path)
-                        print(f">>> [{host['name']}] SUCCESS: {os.path.basename(json_path)}")
-                        
-                        # Verify JSON content
-                        try:
-                            with open(json_path, 'r') as f:
-                                json_data = json.load(f)
-                            print(f">>> [{host['name']}] JSON contains {len(json_data)} segments")
-                        except Exception as json_e:
-                            print(f">>> [{host['name']}] WARNING: Could not read JSON content: {json_e}")
-                        successful += 1
-                    else:
-                        print(f">>> [{host['name']}] ERROR: detect_silence did not create {os.path.basename(json_path)}")
-                except Exception as e:
-                    print(f">>> [{host['name']}] ERROR: silence detection failed: {e}")
-                    import traceback
-                    print(f">>> [{host['name']}] Traceback: {traceback.format_exc()}")
-            
-            print(f">>> Silence detection complete: {successful}/{len(per_host_wavs)} successful")
-        else:
-            print(f">>> No WAV files found for processing")
+                # Process the WAV file
+                result = detect_silence(
+                    wav_file, 
+                    min_sil_ms=CONFIG["min_silence_ms"],
+                    pad_ms=CONFIG["padding_ms"],
+                    out_json=json_path,
+                    silence_thresh_db=CONFIG["silence_threshold_db"],
+                    fps_hint=CONFIG["fps_hint"]
+                )
+                
+                if os.path.exists(json_path):
+                    # Count segments
+                    speech_count = len([s for s in result if not s.get("is_silence", False)])
+                    silence_count = len([s for s in result if s.get("is_silence", False)])
+                    print(f">>> [{host['name']}] SUCCESS: {speech_count} speech, {silence_count} silence segments")
+                    successful += 1
+                else:
+                    print(f">>> [{host['name']}] ERROR: detect_silence did not create {os.path.basename(json_path)}")
+            except Exception as e:
+                print(f">>> [{host['name']}] ERROR: silence detection failed: {e}")
+        
+        print(f">>> Silence detection complete: {successful}/{len(per_host_wavs)} successful")
     else:
-        print(f">>> Skipped silence detection - using existing JSON files")
+        print(f">>> No WAV files found for processing")
     
     # Switch to edit page and refresh handles
     proj, tl, mp = refresh_handles(resolve)
     
-    print(f">>> DEBUG: Initial timeline object: {type(tl)}")
-    print(f">>> DEBUG: Initial timeline is None: {tl is None}")
-    
     # Verify silence detection files
-    for host in hosts:
-        json_path = os.path.join(OUTDIR, f"{host['name']}.json")
-        if not os.path.exists(json_path):
-            print(f">>> WARNING: {host['name']}.json not found")
+    missing_files = [host['name'] for host in hosts if not os.path.exists(os.path.join(OUTDIR, f"{host['name']}.json"))]
+    if missing_files:
+        print(f">>> WARNING: Missing JSON files for: {', '.join(missing_files)}")
     
     # Get FPS from timeline settings
     fps = float(proj.GetSetting("timelineFrameRate") or "29.97")
@@ -1075,8 +946,6 @@ def main():
         # Get fresh timeline reference
         try:
             fresh_proj, fresh_tl, fresh_mp = refresh_handles(resolve)
-            print(f">>> DEBUG: Fresh timeline object: {type(fresh_tl)}")
-            print(f">>> DEBUG: Fresh timeline is None: {fresh_tl is None}")
         except Exception as e:
             print(f">>> ERROR: Could not get fresh timeline: {e}")
             return
@@ -1161,7 +1030,7 @@ def main():
                     "recordFrame": recF,
                     "trackIndex": track_index,
                     "mediaType": 2,  # Audio
-                    "trackType": "audio",  # Critical fix - tells Resolve it's audio
+                    "trackType": "audio",
                     "is_silence": is_silence
                 }
                 all_clip_infos.append(clip_info)
@@ -1204,23 +1073,15 @@ def main():
     try:
         proj, tl, mp = refresh_handles(resolve)
         
-        # Mute original tracks for A/B comparison
-        for host in hosts:
-            try:
-                original_track = host["track"]
-                tl.SetTrackMute("audio", original_track, True)
-            except Exception as e:
-                print(f">>> Could not mute track {host['track']}: {e}")
+        # Original tracks remain unmuted for comparison
     except Exception as e:
         print(f">>> Could not refresh handles for track muting: {e}")
     
     # Final summary
     if use_compound_processing:
         print(f">>> Done. Applied silence gating using compound processing")
-        print(f">>> Processed compound clips with silence segments disabled")
     else:
         print(f">>> Done. Applied silence gating to {len(hosts)} hosts")
-        print(f">>> Each host has been processed on their own track with silence segments disabled")
     
     # Show track summary
     print(f">>> Timeline track summary:")
@@ -1240,6 +1101,4 @@ if __name__ == "__main__":
         print(f">>> Cleaning up temp directory...")
         if os.path.exists(OUTDIR):
             shutil.rmtree(OUTDIR, ignore_errors=True)
-            print(f">>> Cleaned up: {OUTDIR}")
-        else:
-            print(f">>> Temp directory already cleaned up")
+        print(f">>> Cleanup complete")

@@ -70,17 +70,28 @@ An automated DaVinci Resolve script that intelligently processes podcast audio b
    - **Windows**: `~/AppData/Roaming/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/`
    - **Linux**: `~/.local/share/DaVinciResolve/Fusion/Scripts/Utility/`
 
-4. **Import the render preset**:
-   - Copy `AudioOnly_IndividualClips.xml` to your DaVinci Resolve presets folder
-   - **macOS**: `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Support/Resolve Disk Database/Resolve Preferences/Export/`
-   - **Windows**: `~/AppData/Roaming/Blackmagic Design/DaVinci Resolve/Support/Resolve Disk Database/Resolve Preferences/Export/`
-   - **Linux**: `~/.local/share/DaVinciResolve/Support/Resolve Disk Database/Resolve Preferences/Export/`
-   - Or manually create a render preset with these settings:
+4. **Import the render preset** (IMPORTANT - Required for script to work):
+   
+   **Option A: Automatic Import (Recommended)**
+   - The `setup.py` script automatically copies the preset file to the correct location
+   - If you used `python setup.py`, the preset should already be installed
+   
+   **Option B: Manual Import**
+   - Copy `AudioOnly_IndividualClips.xml` to your DaVinci Resolve presets folder:
+     - **macOS**: `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Support/Resolve Disk Database/Resolve Preferences/Export/`
+     - **Windows**: `~/AppData/Roaming/Blackmagic Design/DaVinci Resolve/Support/Resolve Disk Database/Resolve Preferences/Export/`
+     - **Linux**: `~/.local/share/DaVinciResolve/Support/Resolve Disk Database/Resolve Preferences/Export/`
+   
+   **Option C: Manual Creation**
+   - If the preset file doesn't work, manually create a render preset with these settings:
      - Format: WAV
      - Audio Codec: LPCM
      - Audio Bit Depth: 24-bit
      - Sample Rate: 48kHz
      - Custom Name: `%{Clip Name}`
+     - Name the preset: `AudioOnly_IndividualClips`
+   
+   **Verify Installation**: The preset should appear in DaVinci Resolve's render preset dropdown menu
 
 ## Usage
 
