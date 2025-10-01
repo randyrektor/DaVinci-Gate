@@ -308,8 +308,8 @@ def append_from_compound(item, dst_idx, segs, fps, mp):
         return []
 
 def process_compound_clips(tl, mp, proj, fps, hosts):
-    """Process compound clips from source tracks to new processed tracks, grouping by source track."""
-    print(f">>> Processing compound clips for {len(hosts)} hosts...")
+    """Process clips from source tracks to new processed tracks, grouping by source track."""
+    print(f">>> Processing clips for {len(hosts)} hosts...")
     
     # Group hosts by source track
     hosts_by_track = {}
@@ -333,13 +333,13 @@ def process_compound_clips(tl, mp, proj, fps, hosts):
         
         # Ensure destination track is accessible
         
-        # Get all compound clips from source track
+        # Get all clips from source track
         items = tl.GetItemListInTrack("audio", src_idx) or []
         if not items: 
             print(f">>> Track {src_idx} empty, skipping")
             continue
         
-        print(f">>> Found {len(items)} compound clips on track {src_idx}")
+        print(f">>> Found {len(items)} clips on track {src_idx}")
         
         # Process all hosts on this track together
         all_clip_infos = []
@@ -360,7 +360,7 @@ def process_compound_clips(tl, mp, proj, fps, hosts):
             print(f">>> Loaded {len(segs)} segments for {host['name']}")
             total_segments += len(segs)
             
-            # Find the matching compound clip for this host
+            # Find the matching clip for this host
             matching_item = None
             for item in items:
                 if item.GetName() == host['clip']:
@@ -368,7 +368,7 @@ def process_compound_clips(tl, mp, proj, fps, hosts):
                     break
             
             if not matching_item:
-                print(f">>> WARNING: Could not find compound clip '{host['clip']}' for {host['name']}")
+                print(f">>> WARNING: Could not find clip '{host['clip']}' for {host['name']}")
                 continue
             
             # Create clip infos for this host's segments
@@ -377,7 +377,7 @@ def process_compound_clips(tl, mp, proj, fps, hosts):
                 print(f">>> ERROR: No Media Pool Item for {host['name']}")
                 continue
             
-            # Get compound clip duration and anchor position
+            # Get clip duration and anchor position
             try: 
                 durF = int(float(mpi.GetClipProperty("Frames") or 0))
             except: 
@@ -386,7 +386,7 @@ def process_compound_clips(tl, mp, proj, fps, hosts):
             anchor = int(matching_item.GetStart())
             recF = anchor
             
-            # Add any gap between compound clips
+            # Add any gap between clips
             if all_clip_infos:
                 # Add small gap between different hosts
                 recF = all_clip_infos[-1]["recordFrame"] + (all_clip_infos[-1]["endFrame"] - all_clip_infos[-1]["startFrame"]) + int(0.1 * fps)  # 100ms gap
@@ -865,9 +865,11 @@ def main():
         wav_file = None
         patterns_to_try = [
             f"{host['clip']}.wav",                    # Expected: [TrackName].wav
-            f"{host['clip']}00000000.wav",            # Actual: [TrackName]00000000.wav
+            f"{host['clip']}00000000.wav",            # Compound: [TrackName]00000000.wav
+            f"{host['clip']}_00000000.wav",           # Regular: [TrackName]_00000000.wav
             f"{host['name']}.wav",                    # Alternative: [NormalizedName].wav
-            f"{host['name']}00000000.wav"             # Alternative: [NormalizedName]00000000.wav
+            f"{host['name']}00000000.wav",            # Alternative compound: [NormalizedName]00000000.wav
+            f"{host['name']}_00000000.wav"            # Alternative regular: [NormalizedName]_00000000.wav
         ]
         
         for pattern in patterns_to_try:
@@ -931,11 +933,11 @@ def main():
     # Get FPS from timeline settings
     fps = float(proj.GetSetting("timelineFrameRate") or "29.97")
     
-    # Check if we should use compound processing (tracks A2/A3 -> A5/A6)
-    use_compound_processing = CONFIG.get("use_compound_processing", True)  # Try compound approach by default
+    # Check if we should use grouped processing (tracks A2/A3 -> A5/A6)
+    use_compound_processing = CONFIG.get("use_compound_processing", True)  # Try grouped approach by default
     
     if use_compound_processing:
-        print(">>> Using compound processing approach")
+        print(">>> Using grouped processing approach")
         process_compound_clips(tl, mp, proj, fps, hosts)
     else:
         print(">>> Using individual track processing approach")
@@ -1079,7 +1081,7 @@ def main():
     
     # Final summary
     if use_compound_processing:
-        print(f">>> Done. Applied silence gating using compound processing")
+        print(f">>> Done. Applied silence gating using grouped processing")
     else:
         print(f">>> Done. Applied silence gating to {len(hosts)} hosts")
     
