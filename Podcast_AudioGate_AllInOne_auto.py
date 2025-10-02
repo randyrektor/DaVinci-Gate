@@ -341,11 +341,10 @@ def process_compound_clips(tl, mp, proj, fps, hosts):
         
         print(f">>> Found {len(items)} clips on track {src_idx}")
         
-        # Process all hosts on this track together
-        all_clip_infos = []
-        total_segments = 0
-        
-        for host in track_hosts:
+        # Process each host individually to avoid Media Pool Item conflicts
+        for host_idx, host in enumerate(track_hosts):
+            print(f">>> Processing {host['name']} individually...")
+            
             # Load segments for this host
             json_path = f"{OUTDIR}/{host['name']}.json"
             if not os.path.exists(json_path):
@@ -358,106 +357,89 @@ def process_compound_clips(tl, mp, proj, fps, hosts):
                 continue
                 
             print(f">>> Loaded {len(segs)} segments for {host['name']}")
-            total_segments += len(segs)
             
-            # Find the matching clip for this host
-            matching_item = None
-            for item in items:
-                if item.GetName() == host['clip']:
-                    matching_item = item
-                    break
-            
+            # Use the host's original item directly (from discover_hosts)
+            matching_item = host['item']
             if not matching_item:
-                print(f">>> WARNING: Could not find clip '{host['clip']}' for {host['name']}")
+                print(f">>> WARNING: No original item for {host['name']}")
                 continue
             
-            # Create clip infos for this host's segments
+            # Use the host's original item directly (from discover_hosts)
             mpi = matching_item.GetMediaPoolItem()
             if not mpi:
                 print(f">>> ERROR: No Media Pool Item for {host['name']}")
                 continue
             
-            # Get clip duration and anchor position
-            try: 
-                durF = int(float(mpi.GetClipProperty("Frames") or 0))
-            except: 
-                durF = 0
+            host_clip_infos = []
             
-            anchor = int(matching_item.GetStart())
-            recF = anchor
-            
-            # Add any gap between clips
-            if all_clip_infos:
-                # Add small gap between different hosts
-                recF = all_clip_infos[-1]["recordFrame"] + (all_clip_infos[-1]["endFrame"] - all_clip_infos[-1]["startFrame"]) + int(0.1 * fps)  # 100ms gap
+            # Get timeline clip start time and duration
+            timeline_start = int(matching_item.GetStart())
+            timeline_end = int(matching_item.GetEnd())
+            timeline_duration = timeline_end - timeline_start
             
             for sF, eF, isSil in segs:
-                if durF:  # clamp if we know length
-                    sF = max(0, min(sF, durF-1))
-                    eF = max(0, min(eF, durF))
-                    if eF <= sF: continue
+                # Clamp segments to timeline clip duration
+                sF = max(0, min(sF, timeline_duration-1))
+                eF = max(0, min(eF, timeline_duration))
+                if eF <= sF: continue
+                
+                record_frame = timeline_start + sF
                 
                 clip_info = {
                     "mediaPoolItem": mpi,
                     "startFrame": sF,
                     "endFrame": eF,
-                    "recordFrame": recF,
+                    "recordFrame": record_frame,
                     "trackIndex": dst_idx,
                     "mediaType": 2,
                     "trackType": "audio",
                     "is_silence": isSil,
-                    "host_name": host['name']  # Store host name for later processing
+                    "host_name": host['name']
                 }
-                all_clip_infos.append(clip_info)
-                recF += (eF - sF)  # butt-join
+                host_clip_infos.append(clip_info)
+            
+            # Process this host's segments immediately
+            if not host_clip_infos:
+                print(f">>> No valid segments found for {host['name']}")
+                continue
+            
+            # Append this host's segments
+            added = append_in_chunks(host_clip_infos, mp)
+            
+            if not added:
+                print(f">>> WARNING: No items were appended for {host['name']}")
+                continue
+            
+            # Add fades and disable silence segments
+            fade_f = max(1, int(0.02*fps))
+            disabled_count = 0
+            for j, (clip, clip_info) in enumerate(zip(added, host_clip_infos)):
+                try:
+                    clip.SetProperty("AudioFadeIn",  fade_f)
+                    clip.SetProperty("AudioFadeOut", fade_f)
+                    if clip_info.get("is_silence", False): 
+                        try: 
+                            clip.SetClipEnabled(False)
+                            disabled_count += 1
+                        except: 
+                            try:
+                                clip.SetProperty("Enabled", False)
+                                disabled_count += 1
+                            except:
+                                pass
+                except:
+                    pass
         
-        if not all_clip_infos:
-            print(f">>> No valid segments found for track {src_idx}")
-            continue
-        
-        print(f">>> Created {len(all_clip_infos)} total clip infos for track {dst_idx}")
-        
-        # Append all segments in one call
-        print(f">>> Appending {len(all_clip_infos)} clips to track {dst_idx}...")
-        added = append_in_chunks(all_clip_infos, mp)
-        print(f">>> AppendToTimeline returned {len(added)} items for track {dst_idx}")
-        
-        if not added:
-            print(f">>> WARNING: No items were appended for track {src_idx} - this may indicate an API issue")
-            continue
-        
-        # Set track name (use first host's name or generic name)
+        # Set track name
         track_name = f"[Processed] {track_hosts[0]['name']}"
         if len(track_hosts) > 1:
             track_name += f" +{len(track_hosts)-1} more"
         
         try:
             tl.SetTrackName("audio", dst_idx, track_name)
-            print(f">>> Set track name: {track_name}")
-        except Exception as e:
-            print(f">>> Could not set track name: {e}")
+        except:
+            pass
         
-        # Add fades and disable silence segments
-        fade_f = max(1, int(0.02*fps))
-        disabled_count = 0
-        for j, (clip, clip_info) in enumerate(zip(added, all_clip_infos)):
-            try:
-                clip.SetProperty("AudioFadeIn",  fade_f)
-                clip.SetProperty("AudioFadeOut", fade_f)
-                if clip_info.get("is_silence", False): 
-                    try: 
-                        clip.SetClipEnabled(False)
-                        disabled_count += 1
-                    except: 
-                        try:
-                            clip.SetProperty("Enabled", False)
-                            disabled_count += 1
-                        except:
-                            pass
-            except Exception as e:
-                print(f">>> Could not process clip {j}: {e}")
-        
-        print(f">>> Track {dst_idx}: Disabled {disabled_count} silence segments from {len(track_hosts)} hosts")
 
 def process_host_new_timeline(tl, mp, host, fps, track_index, resolve_obj):
     """Process a single host and append to new timeline with silence gating."""

@@ -95,9 +95,18 @@ An automated DaVinci Resolve script that intelligently processes podcast audio b
 
 ## Usage
 
+### ⚠️ IMPORTANT: Use Compound Clips for Frame Accuracy
+
+**For best results and frame-accurate processing, always use compound clips:**
+
+- **Regular clips** may experience sync issues, especially with different frame rates
+- **Compound clips** provide perfect frame accuracy and eliminate sync problems
+- **How to create**: Right-click any clip → "Create Compound Clip"
+
 ### Recommended Workflow (Single Track)
 
 1. **Prepare your timeline**:
+   - **Convert each clip to a compound clip first** (right-click → "Create Compound Clip")
    - Place all compound clips (e.g., "1Scott", "2Wes", "3CJ") on a single audio track
    - Ensure clips have descriptive names that will become the host names
 
@@ -186,6 +195,8 @@ The script creates new tracks named `[Processed] [HostName]` with:
 - Small crossfades for smooth transitions
 
 ## Known Limitations
+
+- **Frame Rate Issues with Regular Clips**: Regular clips with different frame rates (e.g., 52fps vs 29.97fps) may experience sync issues and phasiness. **Always use compound clips for frame-accurate results.**
 
 - **Single Source Track Processing**: The script currently processes one source track at a time. For multiple source tracks, you need to process them separately and combine results manually.
 
