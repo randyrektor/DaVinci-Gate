@@ -34,8 +34,6 @@ An automated DaVinci Resolve script that intelligently processes podcast audio b
 - **Editing Options**: Keep as compound clips for easy movement, or decompose for detailed editing
 - **Clean Results**: Each speaker gets their own gated compound clip with silence automatically handled
 
-<img width="2542" height="414" alt="Screenshot 2025-09-22 at 10 29 45 AM" src="https://github.com/user-attachments/assets/3d82eda1-75fa-406c-9d0f-743fe7bda250" />
-
 ## Quick Start
 
 1. **Clone or download** this repository
@@ -111,11 +109,13 @@ An automated DaVinci Resolve script that intelligently processes podcast audio b
    - **Convert each clip to a compound clip first** (right-click → "Create Compound Clip")
    - Place all compound clips (e.g., "John", "Aaron", "Koolaid Man") on a single audio track (Track 1)
    - Ensure clips have descriptive names that will become the speaker names
+<img width="1634" height="556" alt="Screenshot 2025-10-03 at 1 47 15 PM" src="https://github.com/user-attachments/assets/2a3d8728-64c5-482c-a923-9266b380dd82" />
 
 2. **Run DaVinci Gate**:
    - Open DaVinci Resolve
    - Go to Workspace > Scripts > Utility
    - Run `DaVinciGate`
+<img width="415" height="181" alt="Screenshot 2025-10-03 at 1 47 26 PM" src="https://github.com/user-attachments/assets/3613b340-4a84-499d-b855-37bd4429803a" />
 
 3. **The script will automatically**:
    - Detect all compound clips on the source track
@@ -123,10 +123,14 @@ An automated DaVinci Resolve script that intelligently processes podcast audio b
    - Analyze silence patterns using pydub
    - Create processed tracks with segmented audio (silence disabled)
    - Create individual compound clips for each speaker (e.g., "1Scott_Gated", "2Wes_Gated", "3CJ_Gated")
+<img width="1630" height="543" alt="Screenshot 2025-10-03 at 1 48 36 PM" src="https://github.com/user-attachments/assets/0db7b52b-ea4b-4a00-b27c-3225a791916c" />
 
 4. **Manual organization** (after script completes):
    - Drag each speaker's compound clip ("SpeakerName_Gated") to its own audio track
+<img width="1635" height="547" alt="Screenshot 2025-10-03 at 1 49 03 PM" src="https://github.com/user-attachments/assets/b0c3f8f8-ae3f-4c17-b796-776b79b82dbb" />
    - Optional: Right-click compound clip → "Decompose Using Clips" if you need individual segments
+<img width="1632" height="550" alt="Screenshot 2025-10-03 at 1 49 22 PM" src="https://github.com/user-attachments/assets/671545f2-2470-4b80-a2a5-d3ac9a422947" />
+
    - Each compound clip contains perfectly gated audio with silence automatically handled
 
 ### Advanced Usage
