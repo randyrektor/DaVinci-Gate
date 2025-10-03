@@ -127,7 +127,7 @@ An automated DaVinci Resolve script that intelligently processes podcast audio b
 
 4. **Manual organization** (after script completes):
    - Drag each speaker's compound clip ("SpeakerName_Gated") to its own audio track
-<img width="1635" height="547" alt="Screenshot 2025-10-03 at 1 49 03 PM" src="https://github.com/user-attachments/assets/b0c3f8f8-ae3f-4c17-b796-776b79b82dbb" />
+   <img width="1635" height="547" alt="Screenshot 2025-10-03 at 1 49 03 PM" src="https://github.com/user-attachments/assets/b0c3f8f8-ae3f-4c17-b796-776b79b82dbb" />
    - Optional: Right-click compound clip → "Decompose Using Clips" if you need individual segments
 <img width="1632" height="550" alt="Screenshot 2025-10-03 at 1 49 22 PM" src="https://github.com/user-attachments/assets/671545f2-2470-4b80-a2a5-d3ac9a422947" />
 
