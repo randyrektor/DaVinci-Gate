@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Setup script for DaVinci Resolve Podcast Audio Gate
+Setup script for DaVinci Gate
 This script helps users install dependencies and configure the system.
 """
 
@@ -145,7 +145,7 @@ def copy_scripts(script_dir):
     
     files_to_copy = [
         "detect_silence.py",
-        "Podcast_AudioGate_AllInOne_auto.py",
+        "DaVinciGate.py",
         "config.py"
     ]
     
@@ -190,8 +190,8 @@ def copy_preset(preset_dir):
 
 def main():
     """Main setup function."""
-    print("DaVinci Resolve Podcast Audio Gate Setup")
-    print("=" * 50)
+    print("DaVinci Gate Setup")
+    print("=" * 30)
     
     # Check platform
     platform_name = get_platform_info()
@@ -232,19 +232,20 @@ def main():
     print("\nNext steps:")
     print("1. Open DaVinci Resolve")
     print("2. Go to Workspace > Scripts > Utility")
-    print("3. Run 'Podcast_AudioGate_AllInOne_auto'")
+    print("3. Run 'DaVinciGate'")
     print("\nIMPORTANT USAGE NOTES:")
     print("• Place your audio tracks with compound clips in DaVinci Resolve")
     print("• The script automatically detects tracks and processes them")
-    print("• Uses compound processing for optimal performance")
-    print("• Creates processed tracks with silence segments disabled")
+    print("• Creates compound clips for each speaker with silence gated")
     print("• See README.md for detailed usage instructions")
-    print("\nTo customize settings, edit the config.py file in the script directory")
-    print("• All configuration options are available in config.py")
-    print("• No need to manually select render presets - script handles this automatically")
+    print("\nTo verify installation:")
+    print("• Run: python verify_installation.py")
+    print("\nTo customize settings:")
+    print("• Edit the config.py file in the script directory")
     
     return True
 
 if __name__ == "__main__":
     success = main()
     sys.exit(0 if success else 1)
+    

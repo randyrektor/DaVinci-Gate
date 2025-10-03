@@ -1,36 +1,38 @@
-# DaVinci Resolve Podcast Audio Gate
+# DaVinci Gate
 
-An automated DaVinci Resolve script that intelligently processes podcast audio by detecting silence segments and creating gated versions that maintain perfect sync while removing unwanted silence.
+An automated DaVinci Resolve script that intelligently processes podcast audio by detecting silence segments and creating gated compound clips for easy editing workflow.
 
 ## Features
 
 - **Smart Silence Detection**: Uses `pydub` to analyze audio and identify speech vs silence segments
-- **Perfect Sync Preservation**: Appends ALL segments (speech + silence) but disables silence segments to maintain original timing
-- **Batch Processing**: Processes multiple hosts simultaneously with parallel silence detection
+- **Compound Clip Creation**: Creates individual compound clips for each speaker with silence automatically gated
+- **Perfect Sync Preservation**: Maintains original timing by disabling silence segments rather than removing them
+- **Batch Processing**: Processes multiple speakers simultaneously with parallel silence detection
 - **DaVinci Resolve Integration**: Seamlessly works within Resolve's scripting environment
-- **Automatic Track Management**: Creates processed tracks and mutes originals for easy A/B comparison
-- **Robust Error Handling**: Handles large segment counts with chunked processing and comprehensive error recovery
+- **Flexible Workflow**: Creates compound clips that can be easily moved and organized on individual tracks
 
 ## How It Works
 
-1. **Discovery**: Automatically finds all audio tracks with clips in your timeline (accepts any track name)
+1. **Discovery**: Automatically finds all audio tracks with clips in your timeline
 2. **Export**: Renders individual WAV files using the "AudioOnly_IndividualClips" preset
 3. **Analysis**: Processes each WAV file to detect speech and silence segments
-4. **Timeline Manipulation**: Creates new tracks with segmented audio where silence is disabled
-5. **Sync Maintenance**: Preserves original timing by keeping all segments but muting silence
+4. **Processing**: Creates segmented audio with silence segments disabled
+5. **Compound Creation**: Automatically creates compound clips for each speaker (e.g., "1Scott_Gated", "2Wes_Gated")
+6. **Manual Organization**: You drag compound clips to individual tracks and can decompose them if needed
 
-## Usage Patterns
+## Workflow
 
-### Single Track Processing (Recommended)
-- **Best for**: Most podcast workflows
-- **Setup**: Place all compound clips on a single audio track
-- **Result**: One processed track with all hosts' audio gated together
-- **Advantage**: Avoids source patch limitations, most efficient
+### Current Workflow (Recommended)
+- **Setup**: Place all compound clips (speakers) on a single audio track (Track 1)
+- **Processing**: Script creates gated compound clips for each speaker
+- **Organization**: Manually drag each compound clip to its own track
+- **Decomposition**: Use "Decompose Using Clips" if you need individual segments
 
-### Multi-Track Processing
-- **Current limitation**: Only processes one source track at a time
-- **Workaround**: Process tracks separately, then copy/paste results back
-- **Alternative**: Use different timelines for each track, then combine results
+### Why This Approach Works Best
+- **API Limitations**: DaVinci Resolve's API works best when all source clips are on one track
+- **Flexibility**: Compound clips can be easily moved and organized after processing
+- **Editing Options**: Keep as compound clips for easy movement, or decompose for detailed editing
+- **Clean Results**: Each speaker gets their own gated compound clip with silence automatically handled
 
 <img width="2542" height="414" alt="Screenshot 2025-09-22 at 10 29 45 AM" src="https://github.com/user-attachments/assets/3d82eda1-75fa-406c-9d0f-743fe7bda250" />
 
@@ -42,7 +44,7 @@ An automated DaVinci Resolve script that intelligently processes podcast audio b
    python setup.py
    ```
 3. **Open DaVinci Resolve** and load your podcast timeline
-4. **Run the script** from Resolve's Scripts menu
+4. **Run DaVinci Gate** from Resolve's Scripts menu (Workspace > Scripts > Utility > DaVinciGate)
 
 ## Installation
 
@@ -103,43 +105,36 @@ An automated DaVinci Resolve script that intelligently processes podcast audio b
 - **Compound clips** provide perfect frame accuracy and eliminate sync problems
 - **How to create**: Right-click any clip → "Create Compound Clip"
 
-### Recommended Workflow (Single Track)
+### Recommended Workflow
 
 1. **Prepare your timeline**:
    - **Convert each clip to a compound clip first** (right-click → "Create Compound Clip")
-   - Place all compound clips (e.g., "1Scott", "2Wes", "3CJ") on a single audio track
-   - Ensure clips have descriptive names that will become the host names
+   - Place all compound clips (e.g., "John", "Aaron", "Koolaid Man") on a single audio track (Track 1)
+   - Ensure clips have descriptive names that will become the speaker names
 
-2. **Run the script**:
+2. **Run DaVinci Gate**:
    - Open DaVinci Resolve
    - Go to Workspace > Scripts > Utility
-   - Run `Podcast_AudioGate_AllInOne_auto.py`
+   - Run `DaVinciGate`
 
 3. **The script will automatically**:
    - Detect all compound clips on the source track
    - Export individual WAV files using the AudioOnly_IndividualClips preset
    - Analyze silence patterns using pydub
-   - Create one processed track with all hosts' gated audio
-   - Apply crossfades and disable silence segments
-   - Mute original track for easy A/B comparison
+   - Create processed tracks with segmented audio (silence disabled)
+   - Create individual compound clips for each speaker (e.g., "1Scott_Gated", "2Wes_Gated", "3CJ_Gated")
 
-### Multi-Track Workflow (Advanced)
+4. **Manual organization** (after script completes):
+   - Drag each speaker's compound clip ("SpeakerName_Gated") to its own audio track
+   - Optional: Right-click compound clip → "Decompose Using Clips" if you need individual segments
+   - Each compound clip contains perfectly gated audio with silence automatically handled
 
-If you need to process multiple source tracks:
+### Advanced Usage
 
-1. **Process one track at a time**:
-   - Move all compound clips to a single track
-   - Run the script
-   - Copy the processed result to a new timeline or track
-
-2. **Repeat for other tracks**:
-   - Move the next set of compound clips to the same track
-   - Run the script again
-   - Copy results to your main timeline
-
-3. **Combine results**:
-   - Copy all processed segments back to your main timeline
-   - Organize them as needed
+If you need to work with individual segments instead of compound clips:
+- After moving compound clips to individual tracks
+- Right-click the compound clip → "Decompose Using Clips"
+- This gives you access to all the individual speech segments with silence already gated
 
 ## Requirements
 
@@ -151,9 +146,10 @@ If you need to process multiple source tracks:
 ## File Structure
 
 - `detect_silence.py`: Core silence detection algorithm using `pydub`
-- `Podcast_AudioGate_AllInOne_auto.py`: Main DaVinci Resolve automation script
+- `DaVinciGate.py`: Main DaVinci Resolve automation script
 - `config.py`: Configuration file with customizable settings
 - `setup.py`: Automated setup script for easy installation
+- `verify_installation.py`: Installation verification script
 - `AudioOnly_IndividualClips.xml`: DaVinci Resolve render preset for individual WAV export
 - `requirements.txt`: Python dependencies
 
@@ -188,31 +184,36 @@ The script automatically detects DaVinci Resolve installation paths, but you can
 
 ## Output
 
-The script creates new tracks named `[Processed] [HostName]` with:
-- All original segments preserved for sync
-- Silence segments disabled (muted)
-- Speech segments playing normally
-- Small crossfades for smooth transitions
+The script creates:
+- **Processed tracks** with segmented audio where silence segments are disabled
+- **Individual compound clips** for each speaker (e.g., "1Scott_Gated", "2Wes_Gated")
+- **Perfect sync preservation** - all original timing maintained
+- **Automatic crossfades** for smooth transitions between segments
+
+After processing, you can:
+- **Move compound clips** to individual tracks for organization
+- **Keep as compound clips** for easy editing and movement
+- **Decompose using clips** to access individual speech segments if needed
 
 ## Known Limitations
 
-- **Frame Rate Issues with Regular Clips**: Regular clips with different frame rates (e.g., 52fps vs 29.97fps) may experience sync issues and phasiness. **Always use compound clips for frame-accurate results.**
+- **Frame Rate Issues with Regular Clips**: Regular clips with different frame rates may experience sync issues. **Always use compound clips for frame-accurate results.**
 
-- **Single Source Track Processing**: The script currently processes one source track at a time. For multiple source tracks, you need to process them separately and combine results manually.
+- **Manual Organization Required**: After script completion, you need to manually drag compound clips to individual tracks. This provides flexibility but requires a manual step.
 
-- **Source Patch Limitation**: Due to DaVinci Resolve's internal Source Patch mechanism, when processing multiple hosts from the same source track, all hosts are processed together on a single destination track. This is actually beneficial as it avoids the API limitations that occur when trying to place the same Media Pool Item on multiple tracks.
+- **API Limitations**: DaVinci Resolve's API works best when all source clips are on a single track during processing. The script is designed around this limitation.
 
-- **Workarounds**:
-  - **Recommended**: Place all compound clips on a single track for one-pass processing
-  - **Multi-track**: Process each track separately, then copy/paste results back
-  - **Timeline approach**: Use different timelines for each track, then combine results
+- **Current Workflow**:
+  - ✅ **Recommended**: All compound clips on Track 1 → Script creates gated compound clips → Manually organize
+  - ❌ **Not supported**: Direct multi-track processing with automatic organization
 
 ## Troubleshooting
 
 - **ffmpeg Warning**: The `pydub` warning about ffmpeg is normal and doesn't affect functionality
-- **Track Lock Issues**: The script automatically unlocks tracks before processing
-- **Large Projects**: Uses chunked processing to handle projects with many segments
-- **Memory Management**: Automatically cleans up temporary files
+- **Installation Issues**: Run `python verify_installation.py` to check your setup
+- **Compound Clip Creation**: If compound clips aren't created automatically, check that your clips have unique names
+- **Manual Steps**: Remember to manually drag compound clips to individual tracks after processing
+- **Memory Management**: The script automatically cleans up temporary files
 
 ## License
 

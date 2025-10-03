@@ -13,9 +13,9 @@ AUDIO_SAMPLE_RATE = "48000"
 
 # Silence detection settings
 SILENCE_THRESHOLD_DB = -50.0  # dB threshold for silence detection
-MIN_SILENCE_MS = 600          # Minimum silence duration in milliseconds
-PADDING_MS = 120              # Padding around speech segments in milliseconds
-HOLD_MS = 500                 # Extra hold time at end of speech segments
+MIN_SILENCE_MS = 1000          # Minimum silence duration in milliseconds
+PADDING_MS = 400              # Padding around speech segments in milliseconds
+HOLD_MS = 100                 # Extra hold time at end of speech segments
 
 # Processing settings
 CROSSFADE_MS = 20             # Crossfade duration in milliseconds

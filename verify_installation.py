@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Portability test script for DaVinci Resolve Podcast Audio Gate
-This script tests the configuration loading and path detection without requiring DaVinci Resolve.
+DaVinci Gate - Installation Verification Script
+Verifies that all dependencies and configuration are properly set up
+for the DaVinci Gate audio processing script.
 """
 
 import os
@@ -132,9 +133,9 @@ def test_ffmpeg_detection():
         return False
 
 def main():
-    """Run all portability tests."""
-    print("DaVinci Resolve Podcast Audio Gate - Portability Test")
-    print("=" * 60)
+    """Run all installation verification tests."""
+    print("DaVinci Gate - Installation Verification")
+    print("=" * 50)
     
     tests = [
         test_platform_detection,
@@ -155,14 +156,16 @@ def main():
         else:
             print("Test failed!")
     
-    print("\n" + "=" * 60)
-    print(f"Portability Test Results: {passed}/{total} tests passed")
+    print("\n" + "=" * 50)
+    print(f"Installation Verification Results: {passed}/{total} tests passed")
     
     if passed == total:
-        print("✓ All tests passed! The system is ready for use.")
+        print("✓ All tests passed! DaVinci Gate is ready to use.")
+        print("✓ You can now run DaVinciGate.py in DaVinci Resolve.")
         return True
     else:
         print("✗ Some tests failed. Please address the issues above.")
+        print("✗ Fix these issues before running DaVinciGate.py")
         return False
 
 if __name__ == "__main__":
