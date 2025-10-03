@@ -2,6 +2,8 @@
 
 An automated DaVinci Resolve script that intelligently processes podcast audio by detecting silence segments and creating gated compound clips for easy editing workflow.
 
+<img width="2550" height="461" alt="Screenshot 2025-10-03 at 1 57 52 PM" src="https://github.com/user-attachments/assets/cb6f0845-79ea-4ebb-8765-214f1e67fab3" />
+
 ## Features
 
 - **Smart Silence Detection**: Uses `pydub` to analyze audio and identify speech vs silence segments
