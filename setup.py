@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """
-Setup script for DaVinci Gate
-This script helps users install dependencies and configure the system.
+Setup script for DaVinci Gate.
+
+Copies the DaVinci Gate scripts and render preset into DaVinci Resolve's
+Fusion Utility / preset folders for the current OS.
+
+DaVinci Gate now has **no external Python dependencies** — the silence
+detection uses only the standard library (``wave``, ``struct``, ``math``),
+so this setup script does *not* run ``pip install`` and does *not* require
+``ffmpeg``.
 """
 
 import os
 import sys
 import platform
-import subprocess
 import shutil
-from pathlib import Path
+
 
 def get_platform_info():
     """Get platform-specific information."""
@@ -23,10 +29,11 @@ def get_platform_info():
     else:
         return "unknown"
 
+
 def find_davinci_resolve_paths():
-    """Find DaVinci Resolve installation paths."""
+    """Find DaVinci Resolve scripting-module installation paths."""
     platform_name = get_platform_info()
-    
+
     if platform_name == "macos":
         possible_paths = [
             "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Resources/Developer/Scripting/Modules",
@@ -47,19 +54,20 @@ def find_davinci_resolve_paths():
         ]
     else:
         return []
-    
+
     found_paths = []
     for path in possible_paths:
         expanded_path = os.path.expanduser(path)
         if os.path.exists(expanded_path):
             found_paths.append(expanded_path)
-    
+
     return found_paths
 
+
 def find_script_directory():
-    """Find the DaVinci Resolve script directory."""
+    """Find the DaVinci Resolve Fusion Utility script directory."""
     platform_name = get_platform_info()
-    
+
     if platform_name == "macos":
         script_paths = [
             os.path.expanduser("~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility"),
@@ -74,44 +82,18 @@ def find_script_directory():
         ]
     else:
         return None
-    
+
     for path in script_paths:
         if os.path.exists(path):
             return path
-    
-    # If directory doesn't exist, return the first expected path
+
     return script_paths[0] if script_paths else None
 
-def install_dependencies():
-    """Install Python dependencies."""
-    print("Installing Python dependencies...")
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
-        print("✓ Dependencies installed successfully")
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"✗ Failed to install dependencies: {e}")
-        return False
-
-def check_ffmpeg():
-    """Check if ffmpeg is available."""
-    try:
-        subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
-        print("✓ ffmpeg is available")
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("⚠ ffmpeg not found - pydub will attempt to use system audio libraries")
-        print("  For best performance, install ffmpeg:")
-        print("  macOS: brew install ffmpeg")
-        print("  Windows: Download from https://ffmpeg.org/download.html")
-        print("  Linux: sudo apt install ffmpeg (Ubuntu/Debian)")
-        print("  The script will still work without ffmpeg, but may show warnings")
-        return True  # Don't fail setup if ffmpeg is missing
 
 def find_preset_directory():
-    """Find the DaVinci Resolve preset directory."""
+    """Find the DaVinci Resolve render preset directory."""
     platform_name = get_platform_info()
-    
+
     if platform_name == "macos":
         preset_paths = [
             os.path.expanduser("~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Support/Resolve Disk Database/Resolve Preferences/Export/"),
@@ -126,29 +108,28 @@ def find_preset_directory():
         ]
     else:
         return None
-    
+
     for path in preset_paths:
         if os.path.exists(path):
             return path
-    
-    # If directory doesn't exist, return the first expected path
+
     return preset_paths[0] if preset_paths else None
 
+
 def copy_scripts(script_dir):
-    """Copy scripts to the DaVinci Resolve script directory."""
+    """Copy scripts to the DaVinci Resolve Fusion Utility directory."""
     if not script_dir:
         print("✗ Could not determine script directory")
         return False
-    
-    # Create directory if it doesn't exist
+
     os.makedirs(script_dir, exist_ok=True)
-    
+
     files_to_copy = [
         "detect_silence.py",
         "DaVinciGate.py",
-        "config.py"
+        "config.py",
     ]
-    
+
     success = True
     for filename in files_to_copy:
         if os.path.exists(filename):
@@ -162,18 +143,18 @@ def copy_scripts(script_dir):
         else:
             print(f"✗ {filename} not found in current directory")
             success = False
-    
+
     return success
 
+
 def copy_preset(preset_dir):
-    """Copy render preset to the DaVinci Resolve preset directory."""
+    """Copy the render preset XML into DaVinci Resolve's preset directory."""
     if not preset_dir:
         print("✗ Could not determine preset directory")
         return False
-    
-    # Create directory if it doesn't exist
+
     os.makedirs(preset_dir, exist_ok=True)
-    
+
     preset_file = "AudioOnly_IndividualClips.xml"
     if os.path.exists(preset_file):
         dest_path = os.path.join(preset_dir, preset_file)
@@ -188,38 +169,28 @@ def copy_preset(preset_dir):
         print(f"✗ {preset_file} not found in current directory")
         return False
 
+
 def main():
     """Main setup function."""
     print("DaVinci Gate Setup")
     print("=" * 30)
-    
-    # Check platform
+
     platform_name = get_platform_info()
     print(f"Platform: {platform_name}")
-    
-    # Install dependencies
-    if not install_dependencies():
-        print("Setup failed - could not install dependencies")
-        return False
-    
-    # Check ffmpeg (optional)
-    check_ffmpeg()
-    
-    # Find script directory
+    print("No external Python packages required (standard library only).")
+
     script_dir = find_script_directory()
     if not script_dir:
         print("✗ Could not find DaVinci Resolve script directory")
         print("Please manually copy the files to your DaVinci Resolve script directory")
         return False
-    
+
     print(f"Script directory: {script_dir}")
-    
-    # Copy scripts
+
     if not copy_scripts(script_dir):
         print("Setup failed - could not copy scripts")
         return False
-    
-    # Find and copy render preset
+
     preset_dir = find_preset_directory()
     if preset_dir:
         print(f"Preset directory: {preset_dir}")
@@ -227,25 +198,26 @@ def main():
             print("⚠ Warning: Could not copy render preset - you may need to install it manually")
     else:
         print("⚠ Warning: Could not find preset directory - you may need to install the preset manually")
-    
+
     print("\n✓ Setup completed successfully!")
     print("\nNext steps:")
     print("1. Open DaVinci Resolve")
     print("2. Go to Workspace > Scripts > Utility")
     print("3. Run 'DaVinciGate'")
     print("\nIMPORTANT USAGE NOTES:")
-    print("• Place your audio tracks with compound clips in DaVinci Resolve")
-    print("• The script automatically detects tracks and processes them")
-    print("• Creates compound clips for each speaker with silence gated")
+    print("• Place your speakers on separate audio tracks (or all on one — see README)")
+    print("• The script renders each clip, detects silence, and rebuilds new")
+    print("  [Processed] tracks per speaker with silence segments muted in place")
+    print("• Original tracks are left untouched")
     print("• See README.md for detailed usage instructions")
     print("\nTo verify installation:")
     print("• Run: python verify_installation.py")
     print("\nTo customize settings:")
     print("• Edit the config.py file in the script directory")
-    
+
     return True
+
 
 if __name__ == "__main__":
     success = main()
     sys.exit(0 if success else 1)
-    

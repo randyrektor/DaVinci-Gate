@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
 """
-DaVinci Gate - Audio Processing Script
-Processes audio tracks by detecting silence and creating segmented versions.
-Creates compound clips for easy podcast editing workflow.
+DaVinci Gate — Audio Processing Script
+
+Uses stdlib silence detection (``detect_silence``), 24-bit WAV support, and stronger
+clip muting. Re-fetches MediaPool/timeline between append batches; one processed audio
+track per speaker; per-clip host discovery.
+
+Silence analysis uses temporary WAV exports; the timeline is rebuilt **in place** from
+existing source clips. **No** compound clips or ``*_Gated`` Media Pool items — only new
+timeline audio tracks with muted silence.
+
+Run from Workspace → Scripts → Utility → DaVinciGate.
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -13,7 +22,7 @@ import glob
 import shutil
 import tempfile
 
-# Add the detect_silence script to path
+# Add detect_silence to path (same Utility folder as this script)
 try:
     script_dir = os.path.dirname(os.path.abspath(__file__))
 except NameError:
@@ -28,12 +37,13 @@ possible_paths = [
     os.getcwd()
 ]
 
+_detect_module = "detect_silence"
 for path in possible_paths:
-    if os.path.exists(os.path.join(path, "detect_silence.py")):
+    if os.path.exists(os.path.join(path, f"{_detect_module}.py")):
         sys.path.insert(0, path)
         break
 else:
-    print("ERROR: Could not find detect_silence.py in any of these locations:")
+    print(f"ERROR: Could not find {_detect_module}.py in any of these locations:")
     for path in possible_paths:
         print(f"  - {path}")
     sys.exit(1)
@@ -41,7 +51,7 @@ else:
 try:
     from detect_silence import detect_silence
 except ImportError as e:
-    print(f"ERROR: Could not import detect_silence.py: {e}")
+    print(f"ERROR: Could not import {_detect_module}.py: {e}")
     sys.exit(1)
 
 # --- Resolve API bootstrap (Cross-platform) ---
@@ -143,17 +153,30 @@ except ImportError as e:
         "use_compound_processing": True,
     }
 
-# Suppress pydub's ffmpeg warning since it's just informational
-import warnings
-warnings.filterwarnings("ignore", message="Couldn't find ffmpeg or avconv")
-warnings.filterwarnings("ignore", category=RuntimeWarning, module="pydub")
-
 # Use temporary directory for safer handling
 if CONFIG["temp_dir"]:
     OUTDIR = CONFIG["temp_dir"]
     os.makedirs(OUTDIR, exist_ok=True)
 else:
     OUTDIR = tempfile.mkdtemp(prefix="_temp_gate_")
+
+
+def disable_timeline_clip(clip):
+    """Mute/disable a timeline clip using whichever Resolve API accepts."""
+    attempts = (
+        ("SetClipEnabled", lambda: clip.SetClipEnabled(False)),
+        ("Enabled", lambda: clip.SetProperty("Enabled", False)),
+        ("AudioEnabled", lambda: clip.SetProperty("AudioEnabled", False)),
+        ("Volume", lambda: clip.SetProperty("Volume", 0.0)),
+    )
+    for name, fn in attempts:
+        try:
+            fn()
+            return name
+        except Exception:
+            continue
+    return None
+
 
 def refresh_handles(resolve_obj):
     """Refresh object handles to stabilize the API."""
@@ -170,54 +193,102 @@ def refresh_handles(resolve_obj):
         raise RuntimeError("Could not get media pool")
     return p, tl, mp
 
+
+def refresh_pool_handles(resolve_obj):
+    """Re-fetch project / timeline / media pool without switching pages (use between AppendToTimeline batches)."""
+    p = resolve_obj.GetProjectManager().GetCurrentProject()
+    if not p:
+        raise RuntimeError("Could not get current project")
+    tl = p.GetCurrentTimeline()
+    if not tl:
+        raise RuntimeError("Could not get current timeline")
+    mp = p.GetMediaPool()
+    if not mp:
+        raise RuntimeError("Could not get media pool")
+    return p, tl, mp
+
+
 def normalize_name(raw):
     base = raw.strip()
     return base.title()
 
-def append_in_chunks(infos, mp, size=None):
-    """Append timeline items in chunks to avoid large batch failures."""
+
+def _fs_safe_stem(s, max_len=56):
+    """ASCII-ish basename for JSON sidecars (unique per clip)."""
+    s = re.sub(r"[^\w\-]+", "_", s.strip(), flags=re.UNICODE).strip("_")
+    return (s or "clip")[:max_len]
+
+
+def append_in_chunks(infos, mp, size=None, resolve=None):
+    """Append timeline items in chunks to avoid large batch failures.
+
+    If ``resolve`` is the Resolve app object, MediaPool / timeline handles are
+    re-fetched between chunks. Resolve often invalidates the previous MediaPool
+    pointer after AppendToTimeline, which makes the *next* append ignore
+    ``trackIndex`` or return fewer items than requested (the \"second speaker\" glitch).
+    """
     if size is None:
         size = CONFIG["batch_size"]
     out = []
+    n_chunks = (len(infos) + size - 1) // size if size else 1
+    chunk_idx = 0
     for i in range(0, len(infos), size):
-        chunk = infos[i:i+size]
+        chunk = infos[i : i + size]
+        chunk_idx += 1
+        if resolve is not None and i > 0:
+            proj, tl, mp = refresh_pool_handles(resolve)
+            time.sleep(0.05)
         result = mp.AppendToTimeline(chunk) or []
+        if len(result) != len(chunk):
+            print(
+                f">>> WARNING: AppendToTimeline returned {len(result)}/{len(chunk)} items "
+                f"(chunk {chunk_idx}/{n_chunks})"
+            )
         out.extend(result)
-        print(f">>> Appended chunk {i//size + 1}/{(len(infos) + size - 1)//size} ({len(chunk)} items)")
+        print(f">>> Appended chunk {chunk_idx}/{n_chunks} ({len(chunk)} items)")
     return out
 
+
 def discover_hosts(tl):
-    """Find all audio tracks with clips in the timeline."""
+    """Find all audio clips on audio tracks (one host per clip; unique JSON basenames)."""
+    from collections import defaultdict
+
     hosts = []
-    seen = set()
-    
+    per_track_stem_count = defaultdict(int)
+
     for i in range(1, tl.GetTrackCount("audio") + 1):
         items = tl.GetItemListInTrack("audio", i) or []
         for item in items:
             try:
-                name = item.GetName()
-                # Accept any non-empty track name
-                if name and name.strip():
-                    # Use the original name as the host name, or normalize if configured
-                    if CONFIG.get("track_name_normalize", True):
-                        host_name = normalize_name(name.strip())
-                    else:
-                        host_name = name.strip()
-                    
-                    # Skip if we've already seen this name
-                    if host_name not in seen:
-                        hosts.append({
-                            "name": host_name,
-                            "clip": name,
-                            "track": i,
-                            "item": item
-                        })
-                        seen.add(host_name)
-            except:
+                raw_name = item.GetName()
+                if not raw_name or not raw_name.strip():
+                    continue
+                if CONFIG.get("track_name_normalize", True):
+                    compound_label = normalize_name(raw_name.strip())
+                else:
+                    compound_label = raw_name.strip()
+                start_f = int(item.GetStart())
+                stem = _fs_safe_stem(compound_label)
+                per_track_stem_count[(i, stem)] += 1
+                n = per_track_stem_count[(i, stem)]
+                json_name = f"A{i:02d}_{stem}" + (f"_{n}" if n > 1 else "")
+                hosts.append(
+                    {
+                        "name": json_name,
+                        "clip": raw_name.strip(),
+                        "compound_label": compound_label,
+                        "track": i,
+                        "item": item,
+                        "start_f": start_f,
+                    }
+                )
+            except Exception:
                 continue
-    
+
     if not hosts:
-        raise RuntimeError("No audio tracks with clips found. Please ensure your timeline has audio tracks with named clips.")
+        raise RuntimeError(
+            "No audio tracks with clips found. Please ensure your timeline has audio tracks with named clips."
+        )
     return hosts
 
 def load_segments(json_path, fps):
@@ -231,163 +302,146 @@ def load_segments(json_path, fps):
         if eF > sF: out.append((sF, eF, s.get("is_silence", False)))
     return out
 
-def process_compound_clips(tl, mp, proj, fps, hosts):
-    """Process clips from source tracks to new processed tracks, grouping by source track."""
-    print(f">>> Processing clips for {len(hosts)} hosts...")
-    
-    # Group hosts by source track
-    hosts_by_track = {}
-    for host in hosts:
-        src_idx = host["track"]
-        if src_idx not in hosts_by_track:
-            hosts_by_track[src_idx] = []
-        hosts_by_track[src_idx].append(host)
-    
-    # Get current track count and ensure we have enough destination tracks
+def process_compound_clips(resolve_obj, tl, mp, proj, fps, hosts):
+    """One processed timeline audio track per speaker; batched append with handle refresh.
+
+    Does **not** create compound clips or Media Pool ``*_Gated`` items — segments stay
+    as editable timeline clips on new ``[Processed] …`` tracks.
+    """
+    from collections import Counter
+
+    print(f">>> Processing clips for {len(hosts)} host(s) (one processed track per speaker)...")
+
+    hosts_sorted = sorted(hosts, key=lambda h: (h["track"], h.get("start_f", 0)))
+
+    label_counts = Counter(h["compound_label"] for h in hosts_sorted)
+    for h in hosts_sorted:
+        if label_counts[h["compound_label"]] > 1:
+            h["compound_name"] = f"{h['compound_label']} A{h['track']}"
+        else:
+            h["compound_name"] = h["compound_label"]
+
     current_track_count = tl.GetTrackCount("audio")
-    needed_tracks = current_track_count + len(hosts_by_track)
+    needed_tracks = current_track_count + len(hosts_sorted)
     while tl.GetTrackCount("audio") < needed_tracks:
         tl.AddTrack("audio")
-    
-    # Track speaker clips for compound creation
-    speaker_clips = {}  # Dictionary to store clips for each speaker
-    
-    # Process each source track
-    for i, (src_idx, track_hosts) in enumerate(hosts_by_track.items()):
-        dst_idx = current_track_count + i + 1
-        
-        print(f">>> Processing {len(track_hosts)} hosts to track {dst_idx}")
-        
-        # Ensure destination track is accessible
-        
-        # Get all clips from source track
-        items = tl.GetItemListInTrack("audio", src_idx) or []
-        if not items: 
-            print(f">>> Track {src_idx} empty, skipping")
+
+    all_infos = []
+    meta = []
+    host_segments = []
+
+    for host_idx, host in enumerate(hosts_sorted):
+        dst_idx = current_track_count + host_idx + 1
+        json_path = f"{OUTDIR}/{host['name']}.json"
+        if not os.path.exists(json_path):
+            print(f">>> No JSON file found for {host['name']}: {json_path}")
+            host_segments.append([])
             continue
-        
-        print(f">>> Found {len(items)} clips on track {src_idx}")
-        
-        # Process each host individually
-        for host_idx, host in enumerate(track_hosts):
-            # Load segments for this host
-            json_path = f"{OUTDIR}/{host['name']}.json"
-            if not os.path.exists(json_path):
-                print(f">>> No JSON file found for {host['name']}: {json_path}")
+
+        segs = load_segments(json_path, fps)
+        if not segs:
+            print(f">>> No segments found for {host['name']}")
+            host_segments.append([])
+            continue
+
+        matching_item = host["item"]
+        if not matching_item:
+            print(f">>> WARNING: No original item for {host['name']}")
+            host_segments.append([])
+            continue
+
+        mpi = matching_item.GetMediaPoolItem()
+        if not mpi:
+            print(f">>> ERROR: No Media Pool Item for {host['name']}")
+            host_segments.append([])
+            continue
+
+        timeline_start = int(matching_item.GetStart())
+        timeline_end = int(matching_item.GetEnd())
+        timeline_duration = timeline_end - timeline_start
+
+        segment_infos = []
+        for sF, eF, isSil in segs:
+            sF = max(0, min(sF, timeline_duration - 1))
+            eF = max(0, min(eF, timeline_duration))
+            if eF <= sF:
                 continue
-                
-            segs = load_segments(json_path, fps)
-            if not segs:
-                print(f">>> No segments found for {host['name']}")
-                continue
-            
-            # Use the host's original item directly
-            matching_item = host['item']
-            if not matching_item:
-                print(f">>> WARNING: No original item for {host['name']}")
-                continue
-            
-            mpi = matching_item.GetMediaPoolItem()
-            if not mpi:
-                print(f">>> ERROR: No Media Pool Item for {host['name']}")
-                continue
-            
-            host_clip_infos = []
-            
-            # Get timeline clip start time and duration
-            timeline_start = int(matching_item.GetStart())
-            timeline_end = int(matching_item.GetEnd())
-            timeline_duration = timeline_end - timeline_start
-            
-            for sF, eF, isSil in segs:
-                # Clamp segments to timeline clip duration
-                sF = max(0, min(sF, timeline_duration-1))
-                eF = max(0, min(eF, timeline_duration))
-                if eF <= sF: continue
-                
-                record_frame = timeline_start + sF
-                
-                clip_info = {
-                    "mediaPoolItem": mpi,
-                    "startFrame": sF,
-                    "endFrame": eF,
-                    "recordFrame": record_frame,
-                    "trackIndex": dst_idx,
-                    "mediaType": 2,
-                    "trackType": "audio",
-                    "is_silence": isSil,
-                    "host_name": host['name']
-                }
-                host_clip_infos.append(clip_info)
-            
-            # Process this host's segments immediately
-            if not host_clip_infos:
-                print(f">>> No valid segments found for {host['name']}")
-                continue
-            
-            # Append this host's segments
-            added = append_in_chunks(host_clip_infos, mp)
-            
-            if not added:
-                print(f">>> WARNING: No items were appended for {host['name']}")
-                continue
-            
-            # Store the clips for this speaker
-            speaker_clips[host['name']] = added
-            
-            # Add fades and disable silence segments
-            fade_f = max(1, int(0.02*fps))
-            disabled_count = 0
-            for j, (clip, clip_info) in enumerate(zip(added, host_clip_infos)):
-                try:
-                    clip.SetProperty("AudioFadeIn",  fade_f)
-                    clip.SetProperty("AudioFadeOut", fade_f)
-                    if clip_info.get("is_silence", False): 
-                        try: 
-                            clip.SetClipEnabled(False)
-                            disabled_count += 1
-                        except: 
-                            try:
-                                clip.SetProperty("Enabled", False)
-                                disabled_count += 1
-                            except:
-                                pass
-                except:
-                    pass
-        
-        # Set track name
-        track_name = f"[Processed] {track_hosts[0]['name']}"
-        if len(track_hosts) > 1:
-            track_name += f" +{len(track_hosts)-1} more"
-        
+            record_frame = timeline_start + sF
+            clip_info = {
+                "mediaPoolItem": mpi,
+                "startFrame": sF,
+                "endFrame": eF,
+                "recordFrame": record_frame,
+                "trackIndex": dst_idx,
+                "mediaType": 2,
+                "trackType": "audio",
+            }
+            segment_infos.append(clip_info)
+            all_infos.append(clip_info)
+            meta.append({"is_silence": isSil})
+
+        host_segments.append(segment_infos)
+        print(
+            f">>> Host {host_idx + 1}/{len(hosts_sorted)} "
+            f"\"{host['compound_name']}\" → audio track {dst_idx} ({len(segment_infos)} segments)"
+        )
+
+    if not all_infos:
+        print(">>> No segment clip infos to append — aborting")
+        return
+
+    added = append_in_chunks(all_infos, mp, resolve=resolve_obj)
+    if len(added) != len(all_infos):
+        print(
+            f">>> WARNING: expected {len(all_infos)} new timeline items, got {len(added)} "
+            "(per-host segment grouping may be misaligned)"
+        )
+
+    proj, tl, mp = refresh_handles(resolve_obj)
+
+    fade_f = max(1, int(0.02 * fps))
+    disabled_count = 0
+    for clip, m in zip(added, meta):
         try:
-            tl.SetTrackName("audio", dst_idx, track_name)
-        except:
+            clip.SetProperty("AudioFadeIn", fade_f)
+            clip.SetProperty("AudioFadeOut", fade_f)
+            if m.get("is_silence", False):
+                if disable_timeline_clip(clip):
+                    disabled_count += 1
+        except Exception:
             pass
-        
-    # Create individual compound clips for each speaker
-    created_compound_clips = {}
-    
-    for speaker_name, clips in speaker_clips.items():
-        if clips:
-            compound_name = f"{speaker_name}_Gated"
-            compound_clip = create_compound_clip_from_items(tl, mp, clips, compound_name)
-            
-            if compound_clip:
-                created_compound_clips[speaker_name] = compound_clip
-            else:
-                print(f">>> WARNING: Could not create compound clip for {speaker_name}")
-        else:
-            print(f">>> No clips found for {speaker_name} - skipping compound creation")
-    
-    # Summary of created compound clips
-    if created_compound_clips:
-        print(f">>> Successfully created {len(created_compound_clips)} compound clips:")
-        for speaker_name in created_compound_clips.keys():
-            print(f">>>   - {speaker_name}_Gated")
-    else:
-        print(f">>> No compound clips were created")
-        
+    print(f">>> Disabled {disabled_count} silence clip(s) on processed tracks")
+
+    offset = 0
+    for host, infos in zip(hosts_sorted, host_segments):
+        n = len(infos)
+        if n == 0:
+            continue
+        chunk = added[offset : offset + n]
+        offset += n
+        if not chunk:
+            print(f">>> WARNING: no timeline items for host {host['compound_name']}")
+            continue
+        if len(chunk) != n:
+            print(
+                f">>> WARNING: host {host['compound_name']}: "
+                f"appended {len(chunk)}/{n} items"
+            )
+
+    for host_idx, host in enumerate(hosts_sorted):
+        dst_idx = current_track_count + host_idx + 1
+        try:
+            tl.SetTrackName("audio", dst_idx, f"[Processed] {host['compound_name']}")
+        except Exception:
+            pass
+
+    n_with_segments = sum(1 for seg in host_segments if seg)
+    print(
+        f">>> Done: {n_with_segments} speaker track(s) with gated segments on timeline "
+        f"(audio tracks {current_track_count + 1}–{current_track_count + len(hosts_sorted)}). "
+        "No compound clips created."
+    )
+
 
 def create_compound_clip_from_items(tl, mp, items, compound_name):
     """Create a compound clip from a specific list of timeline items."""
@@ -401,6 +455,7 @@ def create_compound_clip_from_items(tl, mp, items, compound_name):
         compound_clip = tl.CreateCompoundClip(items)
         
         if compound_clip:
+            _ensure_compound_media_pool_name(compound_clip, compound_name)
             return compound_clip
         
         # Try with clipName parameter
@@ -408,6 +463,7 @@ def create_compound_clip_from_items(tl, mp, items, compound_name):
         compound_clip = tl.CreateCompoundClip(items, compound_clip_info)
         
         if compound_clip:
+            _ensure_compound_media_pool_name(compound_clip, compound_name)
             return compound_clip
             
         # Try with selection-based approach
@@ -416,6 +472,7 @@ def create_compound_clip_from_items(tl, mp, items, compound_name):
         compound_clip = tl.CreateCompoundClip(items)
         
         if compound_clip:
+            _ensure_compound_media_pool_name(compound_clip, compound_name)
             return compound_clip
             
         return None
@@ -529,30 +586,18 @@ def process_host(tl, mp, host, fps, assigned_track_index, resolve_obj, gap_frame
     
     print(f">>> {host['name']}: appended {len(items)} total clips to track {assigned_track_index}")
 
-    # Disable silence segments and add crossfades
     disabled_count = 0
     fade_s = CONFIG["crossfade_ms"] / 1000.0  # Convert ms to seconds
     fade_f = max(1, int(fade_s * fps))
     
     for i, item in enumerate(items):
         try:
-            # Add crossfades to all clips
             item.SetProperty("AudioFadeIn", fade_f)
             item.SetProperty("AudioFadeOut", fade_f)
-            
-            # Disable silence segments
             if i < len(all_clip_infos) and all_clip_infos[i].get("is_silence", False):
-                try:
-                    item.SetClipEnabled(False)
+                if disable_timeline_clip(item):
                     disabled_count += 1
-                except:
-                    # Alternative method
-                    try:
-                        item.SetProperty("Enabled", False)
-                        disabled_count += 1
-                    except:
-                        pass
-        except: 
+        except Exception:
             pass
 
     print(f">>> Created [Processed] {host['name']} with {len(items)} clips ({disabled_count} silence segments disabled)")
@@ -687,29 +732,39 @@ def main():
         if wav_file:
             per_host_wavs.append((host, wav_file))
     
-    # Run silence detection
+    # Run silence detection (stdlib wave reader — no pydub/numpy; supports 24-bit WAV)
     if per_host_wavs:
+        analysis_fps = float(proj.GetSetting("timelineFrameRate") or CONFIG["fps_hint"])
         successful = 0
+        failed_hosts = []
         for host, wav_file in per_host_wavs:
             json_path = os.path.join(OUTDIR, f"{host['name']}.json")
             
             try:
-                print(f">>> Analyzing: {host['name']}")
-                result = detect_silence(
-                    wav_file, 
+                print(f">>> Analyzing: {host['name']} ({wav_file})")
+                detect_silence(
+                    wav_file,
                     min_sil_ms=CONFIG["min_silence_ms"],
                     pad_ms=CONFIG["padding_ms"],
                     out_json=json_path,
                     silence_thresh_db=CONFIG["silence_threshold_db"],
-                    fps_hint=CONFIG["fps_hint"]
+                    fps_hint=analysis_fps,
+                    hold_ms=CONFIG.get("hold_ms", 500),
                 )
                 
                 if os.path.exists(json_path):
                     successful += 1
+                else:
+                    failed_hosts.append(host["name"])
             except Exception as e:
                 print(f">>> ERROR: Silence detection failed for {host['name']}: {e}")
+                failed_hosts.append(host["name"])
         
         print(f">>> Silence detection complete: {successful}/{len(per_host_wavs)} successful")
+        if failed_hosts:
+            print(f">>> ERROR: No analysis JSON for: {', '.join(failed_hosts)}")
+            print(">>> Aborting timeline rebuild — sync detect_silence.py and re-run.")
+            return
     else:
         print(f">>> ERROR: No WAV files found for processing")
         return
@@ -725,13 +780,13 @@ def main():
     use_compound_processing = CONFIG.get("use_compound_processing", True)
     
     if use_compound_processing:
-        process_compound_clips(tl, mp, proj, fps, hosts)
+        process_compound_clips(resolve, tl, mp, proj, fps, hosts)
     else:
         # Individual processing approach (simplified)
         print(">>> Using individual track processing approach")
         # ... individual processing code would go here if needed
     
-    print(f">>> Processing complete. Created compound clips for each speaker.")
+    print(">>> Processing complete (timeline processed tracks; no compounds).")
 
 if __name__ == "__main__":
     try:

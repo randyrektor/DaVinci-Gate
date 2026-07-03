@@ -1,78 +1,83 @@
 #!/usr/bin/env python3
 """
-DaVinci Gate - Installation Verification Script
-Verifies that all dependencies and configuration are properly set up
-for the DaVinci Gate audio processing script.
+DaVinci Gate — Installation Verification Script.
+
+Sanity-checks that the local checkout is ready to be dropped into DaVinci
+Resolve's Fusion Utility folder. Only the Python standard library is
+required at runtime, so this script no longer verifies ``pydub`` or
+``ffmpeg``.
 """
 
 import os
 import sys
 import platform
-from pathlib import Path
+
 
 def test_config_loading():
     """Test that the configuration loads correctly."""
     print("Testing configuration loading...")
-    
+
     try:
         import config
         print("✓ config.py loaded successfully")
-        
-        # Test that all required variables are defined
+
         required_vars = [
-            'RENDER_PRESET', 'OUTPUT_FORMAT', 'AUDIO_CODEC', 'AUDIO_BIT_DEPTH',
-            'AUDIO_SAMPLE_RATE', 'SILENCE_THRESHOLD_DB', 'MIN_SILENCE_MS',
-            'PADDING_MS', 'HOLD_MS', 'CROSSFADE_MS', 'BATCH_SIZE', 'FPS_HINT'
+            "RENDER_PRESET", "OUTPUT_FORMAT", "AUDIO_CODEC", "AUDIO_BIT_DEPTH",
+            "AUDIO_SAMPLE_RATE", "SILENCE_THRESHOLD_DB", "MIN_SILENCE_MS",
+            "PADDING_MS", "HOLD_MS", "CROSSFADE_MS", "BATCH_SIZE", "FPS_HINT",
         ]
-        
+
         for var in required_vars:
             if not hasattr(config, var):
                 print(f"✗ Missing variable: {var}")
                 return False
-        
+
         print("✓ All required configuration variables found")
         return True
-        
+
     except ImportError as e:
         print(f"✗ Failed to import config.py: {e}")
         return False
 
+
 def test_detect_silence_import():
-    """Test that detect_silence can be imported."""
+    """Test that detect_silence can be imported and its dependencies resolve."""
     print("Testing detect_silence import...")
-    
+
     try:
-        from detect_silence import detect_silence
+        from detect_silence import detect_silence  # noqa: F401
         print("✓ detect_silence imported successfully")
         return True
     except ImportError as e:
         print(f"✗ Failed to import detect_silence: {e}")
         return False
 
+
 def test_platform_detection():
     """Test platform detection."""
     print("Testing platform detection...")
-    
+
     system = platform.system().lower()
     print(f"Detected platform: {system}")
-    
-    if system in ['darwin', 'windows', 'linux']:
+
+    if system in ("darwin", "windows", "linux"):
         print("✓ Platform supported")
         return True
-    else:
-        print(f"✗ Unsupported platform: {system}")
-        return False
+
+    print(f"✗ Unsupported platform: {system}")
+    return False
+
 
 def test_path_expansion():
     """Test path expansion functionality."""
     print("Testing path expansion...")
-    
+
     test_paths = [
         "~/test/path",
         "~/.local/share/test",
-        "~/Library/Application Support/test"
+        "~/Library/Application Support/test",
     ]
-    
+
     for path in test_paths:
         expanded = os.path.expanduser(path)
         if expanded != path:
@@ -80,93 +85,60 @@ def test_path_expansion():
         else:
             print(f"✗ Path expansion failed: {path}")
             return False
-    
+
     return True
 
-def test_dependencies():
-    """Test that required dependencies are available."""
-    print("Testing dependencies...")
-    
-    try:
-        import pydub
-        print("✓ pydub available")
-    except ImportError:
-        print("✗ pydub not available - run: pip install pydub")
-        return False
-    
-    try:
-        import json
-        print("✓ json available")
-    except ImportError:
-        print("✗ json not available")
-        return False
-    
-    try:
-        import tempfile
-        print("✓ tempfile available")
-    except ImportError:
-        print("✗ tempfile not available")
-        return False
-    
-    return True
 
-def test_ffmpeg_detection():
-    """Test ffmpeg detection."""
-    print("Testing ffmpeg detection...")
-    
-    try:
-        import subprocess
-        result = subprocess.run(['ffmpeg', '-version'], 
-                              capture_output=True, 
-                              timeout=5)
-        if result.returncode == 0:
-            print("✓ ffmpeg available")
-            return True
-        else:
-            print("✗ ffmpeg not working properly")
+def test_stdlib_dependencies():
+    """Test that the stdlib modules used by detect_silence are importable."""
+    print("Testing standard-library dependencies...")
+
+    for mod in ("wave", "struct", "math", "json", "tempfile"):
+        try:
+            __import__(mod)
+            print(f"✓ {mod} available")
+        except ImportError:
+            print(f"✗ {mod} not available (Python standard library is broken?)")
             return False
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        print("✗ ffmpeg not found - install ffmpeg for audio processing")
-        return False
-    except Exception as e:
-        print(f"✗ Error testing ffmpeg: {e}")
-        return False
+
+    return True
+
 
 def main():
     """Run all installation verification tests."""
-    print("DaVinci Gate - Installation Verification")
+    print("DaVinci Gate — Installation Verification")
     print("=" * 50)
-    
+
     tests = [
         test_platform_detection,
         test_path_expansion,
-        test_dependencies,
+        test_stdlib_dependencies,
         test_config_loading,
         test_detect_silence_import,
-        test_ffmpeg_detection,
     ]
-    
+
     passed = 0
     total = len(tests)
-    
+
     for test in tests:
         print()
         if test():
             passed += 1
         else:
             print("Test failed!")
-    
+
     print("\n" + "=" * 50)
     print(f"Installation Verification Results: {passed}/{total} tests passed")
-    
+
     if passed == total:
         print("✓ All tests passed! DaVinci Gate is ready to use.")
         print("✓ You can now run DaVinciGate.py in DaVinci Resolve.")
         return True
-    else:
-        print("✗ Some tests failed. Please address the issues above.")
-        print("✗ Fix these issues before running DaVinciGate.py")
-        return False
+
+    print("✗ Some tests failed. Please address the issues above.")
+    print("✗ Fix these issues before running DaVinciGate.py")
+    return False
+
 
 if __name__ == "__main__":
     success = main()

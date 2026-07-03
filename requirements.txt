@@ -1,1 +1,4 @@
-pydub>=0.25.1
+# No external dependencies required.
+# DaVinci Gate uses only the Python standard library (wave, struct, math, json, ...).
+# This keeps it compatible with the Python 3.13+ interpreter embedded in
+# DaVinci Resolve 20+, which cannot install pydub/numpy/audioop cleanly.
