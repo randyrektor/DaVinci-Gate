@@ -126,6 +126,7 @@ def copy_scripts(script_dir):
 
     files_to_copy = [
         "detect_silence.py",
+        "gate_core.py",
         "DaVinciGate.py",
         "config.py",
     ]

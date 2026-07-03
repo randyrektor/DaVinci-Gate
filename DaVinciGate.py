@@ -1,797 +1,684 @@
 #!/usr/bin/env python3
 """
-DaVinci Gate — Audio Processing Script
+DaVinci Gate — entry point.
 
-Uses stdlib silence detection (``detect_silence``), 24-bit WAV support, and stronger
-clip muting. Re-fetches MediaPool/timeline between append batches; one processed audio
-track per speaker; per-clip host discovery.
+Runs the audio "checkerboarding" pipeline: for each host clip on the timeline,
+render its audio, detect silence, and rebuild that speaker onto a new
+``[Processed] …`` audio track with silence clips greyed out (SetClipEnabled).
 
-Silence analysis uses temporary WAV exports; the timeline is rebuilt **in place** from
-existing source clips. **No** compound clips or ``*_Gated`` Media Pool items — only new
-timeline audio tracks with muted silence.
+The pipeline itself lives in :mod:`gate_core` so a future in-Resolve UI can
+drive the same ``analyze``/``commit`` split as this headless entry does.
 
-Run from Workspace → Scripts → Utility → DaVinciGate.
+Run from Workspace -> Scripts -> Utility -> DaVinciGate.
 """
 
 import os
-import re
 import sys
-import json
-import time
-import glob
-import shutil
-import tempfile
+from typing import Optional
 
-# Add detect_silence to path (same Utility folder as this script)
+
 try:
     script_dir = os.path.dirname(os.path.abspath(__file__))
 except NameError:
-    # __file__ not available in DaVinci Resolve, try to find the script directory
     script_dir = os.path.dirname(os.path.abspath(sys.argv[0])) if sys.argv else os.getcwd()
 
-# Add multiple possible paths
-possible_paths = [
+_module_search_paths = [
     script_dir,
     os.path.join(script_dir, "Utility"),
-    os.path.expanduser("~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility"),
-    os.getcwd()
+    os.path.expanduser(
+        "~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility"
+    ),
+    os.getcwd(),
 ]
 
-_detect_module = "detect_silence"
-for path in possible_paths:
-    if os.path.exists(os.path.join(path, f"{_detect_module}.py")):
-        sys.path.insert(0, path)
+for _p in _module_search_paths:
+    if os.path.exists(os.path.join(_p, "gate_core.py")):
+        if _p not in sys.path:
+            sys.path.insert(0, _p)
         break
 else:
-    print(f"ERROR: Could not find {_detect_module}.py in any of these locations:")
-    for path in possible_paths:
-        print(f"  - {path}")
+    print("ERROR: Could not find gate_core.py. Searched:")
+    for _p in _module_search_paths:
+        print(f"  - {_p}")
     sys.exit(1)
 
 try:
-    from detect_silence import detect_silence
+    from gate_core import (
+        Cancelled,
+        GateSettings,
+        analyze,
+        clear_project_cache,
+        commit,
+        discover_hosts,
+        run_headless,
+        summarize,
+    )
 except ImportError as e:
-    print(f"ERROR: Could not import {_detect_module}.py: {e}")
+    print(f"ERROR: Could not import gate_core: {e}")
     sys.exit(1)
 
-# --- Resolve API bootstrap (Cross-platform) ---
-candidates = []
 
-# Add environment variable path if set
+_api_candidates = []
 if os.environ.get("RESOLVE_SCRIPT_API"):
-    candidates.append(os.path.join(os.environ.get("RESOLVE_SCRIPT_API"), "Modules"))
+    _api_candidates.append(os.path.join(os.environ["RESOLVE_SCRIPT_API"], "Modules"))
 
-# macOS paths
 if sys.platform == "darwin":
-    candidates.extend([
-        "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Resources/Developer/Scripting/Modules",
-        "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules",
-        os.path.expanduser("~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules"),
-    ])
-# Windows paths
+    _api_candidates.extend(
+        [
+            "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Resources/Developer/Scripting/Modules",
+            "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules",
+            os.path.expanduser(
+                "~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules"
+            ),
+        ]
+    )
 elif sys.platform == "win32":
-    candidates.extend([
-        os.path.expanduser("~/AppData/Roaming/Blackmagic Design/DaVinci Resolve/Support/Developer/Scripting/Modules"),
-        "C:/Program Files/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules",
-        "C:/Program Files (x86)/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules",
-    ])
-# Linux paths
+    _api_candidates.extend(
+        [
+            os.path.expanduser(
+                "~/AppData/Roaming/Blackmagic Design/DaVinci Resolve/Support/Developer/Scripting/Modules"
+            ),
+            "C:/Program Files/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules",
+            "C:/Program Files (x86)/Blackmagic Design/DaVinci Resolve/Developer/Scripting/Modules",
+        ]
+    )
 elif sys.platform.startswith("linux"):
-    candidates.extend([
-        os.path.expanduser("~/.local/share/DaVinciResolve/Developer/Scripting/Modules"),
-        "/opt/resolve/Developer/Scripting/Modules",
-        "/usr/local/DaVinciResolve/Developer/Scripting/Modules",
-    ])
-for p in candidates:
-    if p and os.path.isdir(p) and p not in sys.path:
-        sys.path.append(p)
+    _api_candidates.extend(
+        [
+            os.path.expanduser("~/.local/share/DaVinciResolve/Developer/Scripting/Modules"),
+            "/opt/resolve/Developer/Scripting/Modules",
+            "/usr/local/DaVinciResolve/Developer/Scripting/Modules",
+        ]
+    )
+
+for _p in _api_candidates:
+    if _p and os.path.isdir(_p) and _p not in sys.path:
+        sys.path.append(_p)
 
 try:
-    import DaVinciResolveScript as dvr
-    resolve = dvr.scriptapp("Resolve")
+    import DaVinciResolveScript as _dvr
+    resolve = _dvr.scriptapp("Resolve")
 except Exception as e:
     print(f"ERROR: DaVinci Resolve API not available: {e}")
     sys.exit(1)
 
-# Configuration
-RENDER_PRESET = "AudioOnly_IndividualClips"
 
-# Load configuration
-try:
-    # Try to import from the same directory as this script
-    import sys
-    import os
-    
-    # Get the directory where this script is located
-    try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-    except NameError:
-        # __file__ not available in DaVinci Resolve, use script_dir from earlier
-        script_dir = os.path.dirname(os.path.abspath(sys.argv[0])) if sys.argv else os.getcwd()
-    
-    # Add script directory to Python path
-    if script_dir not in sys.path:
-        sys.path.insert(0, script_dir)
-    
-    import config
-    CONFIG = {
-        "render_preset": config.RENDER_PRESET,
-        "output_format": config.OUTPUT_FORMAT,
-        "audio_codec": config.AUDIO_CODEC,
-        "audio_bit_depth": config.AUDIO_BIT_DEPTH,
-        "audio_sample_rate": config.AUDIO_SAMPLE_RATE,
-        "silence_threshold_db": config.SILENCE_THRESHOLD_DB,
-        "min_silence_ms": config.MIN_SILENCE_MS,
-        "padding_ms": config.PADDING_MS,
-        "hold_ms": config.HOLD_MS,
-        "crossfade_ms": config.CROSSFADE_MS,
-        "batch_size": config.BATCH_SIZE,
-        "fps_hint": config.FPS_HINT,
-        "script_dir": config.SCRIPT_DIR,
-        "temp_dir": config.TEMP_DIR,
-        "track_name_normalize": True,
-        "use_compound_processing": True,
-    }
-except ImportError as e:
-    # Default configuration
-    CONFIG = {
-        "render_preset": "AudioOnly_IndividualClips",
-        "output_format": "wav",
-        "audio_codec": "lpcm", 
-        "audio_bit_depth": "24",
-        "audio_sample_rate": "48000",
-        "silence_threshold_db": -50.0,
-        "min_silence_ms": 600,
-        "padding_ms": 120,
-        "hold_ms": 500,
-        "crossfade_ms": 20,
-        "batch_size": 250,
-        "fps_hint": 30,
-        "script_dir": None,
-        "temp_dir": None,
-        "track_name_normalize": True,
-        "use_compound_processing": True,
-    }
-
-# Use temporary directory for safer handling
-if CONFIG["temp_dir"]:
-    OUTDIR = CONFIG["temp_dir"]
-    os.makedirs(OUTDIR, exist_ok=True)
-else:
-    OUTDIR = tempfile.mkdtemp(prefix="_temp_gate_")
+_CONFIG_MAPPING = {
+    "SILENCE_THRESHOLD_DB": "silence_threshold_db",
+    "MIN_SILENCE_MS": "min_silence_ms",
+    "PADDING_MS": "padding_ms",
+    "HOLD_MS": "hold_ms",
+    "BATCH_SIZE": "batch_size",
+    "RENDER_PRESET": "render_preset",
+    "FPS_HINT": "fps_hint",
+    "TEMP_DIR": "temp_dir",
+}
 
 
-def disable_timeline_clip(clip):
-    """Mute/disable a timeline clip using whichever Resolve API accepts."""
-    attempts = (
-        ("SetClipEnabled", lambda: clip.SetClipEnabled(False)),
-        ("Enabled", lambda: clip.SetProperty("Enabled", False)),
-        ("AudioEnabled", lambda: clip.SetProperty("AudioEnabled", False)),
-        ("Volume", lambda: clip.SetProperty("Volume", 0.0)),
-    )
-    for name, fn in attempts:
-        try:
-            fn()
-            return name
-        except Exception:
-            continue
-    return None
+def _build_settings() -> GateSettings:
+    """Populate GateSettings from an optional ``config.py`` beside this script.
 
-
-def refresh_handles(resolve_obj):
-    """Refresh object handles to stabilize the API."""
-    resolve_obj.OpenPage("edit")
-    time.sleep(0.5)
-    p = resolve_obj.GetProjectManager().GetCurrentProject()
-    if not p:
-        raise RuntimeError("Could not get current project")
-    tl = p.GetCurrentTimeline()
-    if not tl:
-        raise RuntimeError("Could not get current timeline")
-    mp = p.GetMediaPool()
-    if not mp:
-        raise RuntimeError("Could not get media pool")
-    return p, tl, mp
-
-
-def refresh_pool_handles(resolve_obj):
-    """Re-fetch project / timeline / media pool without switching pages (use between AppendToTimeline batches)."""
-    p = resolve_obj.GetProjectManager().GetCurrentProject()
-    if not p:
-        raise RuntimeError("Could not get current project")
-    tl = p.GetCurrentTimeline()
-    if not tl:
-        raise RuntimeError("Could not get current timeline")
-    mp = p.GetMediaPool()
-    if not mp:
-        raise RuntimeError("Could not get media pool")
-    return p, tl, mp
-
-
-def normalize_name(raw):
-    base = raw.strip()
-    return base.title()
-
-
-def _fs_safe_stem(s, max_len=56):
-    """ASCII-ish basename for JSON sidecars (unique per clip)."""
-    s = re.sub(r"[^\w\-]+", "_", s.strip(), flags=re.UNICODE).strip("_")
-    return (s or "clip")[:max_len]
-
-
-def append_in_chunks(infos, mp, size=None, resolve=None):
-    """Append timeline items in chunks to avoid large batch failures.
-
-    If ``resolve`` is the Resolve app object, MediaPool / timeline handles are
-    re-fetched between chunks. Resolve often invalidates the previous MediaPool
-    pointer after AppendToTimeline, which makes the *next* append ignore
-    ``trackIndex`` or return fewer items than requested (the \"second speaker\" glitch).
+    Missing config is fine — the dataclass defaults reproduce v4's behavior.
     """
-    if size is None:
-        size = CONFIG["batch_size"]
-    out = []
-    n_chunks = (len(infos) + size - 1) // size if size else 1
-    chunk_idx = 0
-    for i in range(0, len(infos), size):
-        chunk = infos[i : i + size]
-        chunk_idx += 1
-        if resolve is not None and i > 0:
-            proj, tl, mp = refresh_pool_handles(resolve)
-            time.sleep(0.05)
-        result = mp.AppendToTimeline(chunk) or []
-        if len(result) != len(chunk):
-            print(
-                f">>> WARNING: AppendToTimeline returned {len(result)}/{len(chunk)} items "
-                f"(chunk {chunk_idx}/{n_chunks})"
-            )
-        out.extend(result)
-        print(f">>> Appended chunk {chunk_idx}/{n_chunks} ({len(chunk)} items)")
-    return out
+    settings = GateSettings()
+    try:
+        import config
+    except ImportError:
+        return settings
+    for old, new in _CONFIG_MAPPING.items():
+        if hasattr(config, old):
+            setattr(settings, new, getattr(config, old))
+    return settings
 
 
-def discover_hosts(tl):
-    """Find all audio clips on audio tracks (one host per clip; unique JSON basenames)."""
-    from collections import defaultdict
+def _print_result(result) -> None:
+    if result is None:
+        print(">>> Cancelled.")
+        return
+    if result.warnings:
+        print(f">>> {len(result.warnings)} warning(s) during run:")
+        for w in result.warnings:
+            print(f"    - {w}")
+    if result.disabled_by_method:
+        print(f">>> Disable methods used: {result.disabled_by_method}")
+    print(
+        f">>> Processing complete: {result.disabled_count} silence clip(s) disabled "
+        f"across {result.tracks_created} processed track(s)."
+    )
 
-    hosts = []
-    per_track_stem_count = defaultdict(int)
 
-    for i in range(1, tl.GetTrackCount("audio") + 1):
-        items = tl.GetItemListInTrack("audio", i) or []
-        for item in items:
-            try:
-                raw_name = item.GetName()
-                if not raw_name or not raw_name.strip():
-                    continue
-                if CONFIG.get("track_name_normalize", True):
-                    compound_label = normalize_name(raw_name.strip())
-                else:
-                    compound_label = raw_name.strip()
-                start_f = int(item.GetStart())
-                stem = _fs_safe_stem(compound_label)
-                per_track_stem_count[(i, stem)] += 1
-                n = per_track_stem_count[(i, stem)]
-                json_name = f"A{i:02d}_{stem}" + (f"_{n}" if n > 1 else "")
-                hosts.append(
+def _try_discover_hosts(resolve) -> list:
+    """Best-effort host discovery for the UI's summary label.
+
+    Never raises: any failure (no project, no timeline, no clips) returns [].
+    """
+    try:
+        proj = resolve.GetProjectManager().GetCurrentProject()
+        if not proj:
+            return []
+        tl = proj.GetCurrentTimeline()
+        if not tl:
+            return []
+        return discover_hosts(tl, GateSettings())
+    except Exception:
+        return []
+
+
+def _hosts_summary(hosts: list) -> str:
+    if not hosts:
+        return (
+            "No hosts detected. Open a timeline with named audio clips, "
+            "then click Refresh."
+        )
+    parts = [f"Track {h['track']}: \"{h['compound_label']}\"" for h in hosts]
+    return f"Hosts ({len(hosts)}): " + ", ".join(parts)
+
+
+def _fmt_ms_hms(ms: int) -> str:
+    """Format milliseconds as H:MM:SS (or M:SS if under an hour)."""
+    if ms is None:
+        return "-"
+    secs = int(max(0, ms) // 1000)
+    h, rem = divmod(secs, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def _launch_ui(resolve, initial_settings: GateSettings) -> bool:
+    """Open the UIManager window: Analyze/Apply flow with adaptive
+    auto-calibration.
+
+    Flow:
+      1. On open, discover hosts. Per-host override rows are baked into the
+         layout for the current host list.
+      2. User clicks Analyze -> renders (or reuses WAV cache), measures
+         audio stats per host, computes an adaptive threshold from
+         (noise floor + strictness * (speech level - noise floor)) with
+         per-host overrides taking precedence. Then runs silence detection
+         and shows the per-host preview table. The window is blocked during
+         the render — progress text streams to the Resolve Console.
+      3. User inspects, tweaks any setting or per-host override, clicks
+         Analyze again (fast: cache hits + cached stats), Apply to commit.
+
+    Returns True on clean open+close, False if UI init failed (fall back to
+    headless).
+    """
+    try:
+        fusion = resolve.Fusion()
+    except Exception as e:
+        print(f">>> UI init: could not access Fusion(): {e}")
+        return False
+    if not fusion:
+        print(">>> UI init: Fusion() returned None")
+        return False
+
+    try:
+        ui = fusion.UIManager
+        disp = _dvr.UIDispatcher(ui)
+    except Exception as e:
+        print(f">>> UI init: UIManager/UIDispatcher not available: {e}")
+        return False
+
+    initial_hosts = _try_discover_hosts(resolve)
+    LABEL_MIN = [240, 0]
+
+    def _field_row(label_text: str, field_id: str, initial: str):
+        return ui.HGroup(
+            {"Weight": 0, "Spacing": 8},
+            [
+                ui.Label({"Text": label_text, "Weight": 0, "MinimumSize": LABEL_MIN}),
+                ui.LineEdit({"ID": field_id, "Text": initial, "Weight": 1.0}),
+            ],
+        )
+
+    def _override_row(host):
+        indent = "    "
+        label = f"{indent}{host['compound_label']} (track {host['track']}):"
+        return ui.HGroup(
+            {"Weight": 0, "Spacing": 8},
+            [
+                ui.Label({"Text": label, "Weight": 0, "MinimumSize": LABEL_MIN}),
+                ui.LineEdit(
                     {
-                        "name": json_name,
-                        "clip": raw_name.strip(),
-                        "compound_label": compound_label,
-                        "track": i,
-                        "item": item,
-                        "start_f": start_f,
+                        "ID": f"HostOverride_{host['name']}",
+                        "Text": "",
+                        "PlaceholderText": "auto",
+                        "Weight": 1.0,
                     }
+                ),
+            ],
+        )
+
+    override_rows = [_override_row(h) for h in initial_hosts]
+    override_header_text = (
+        "Per-host threshold overrides (dB, blank = auto):"
+        if initial_hosts
+        else "Per-host threshold overrides: (no hosts detected — reopen after loading a timeline)"
+    )
+    strictness_initial = f"{initial_settings.strictness * 100.0:.0f}"
+
+    try:
+        win = disp.AddWindow(
+            {
+                "ID": "DGateMainWindow",
+                "WindowTitle": "DaVinci Gate",
+                "Geometry": [180, 180, 820, 720],
+            },
+            [
+                ui.VGroup(
+                    {"Spacing": 8},
+                    [
+                        ui.Label(
+                            {
+                                "ID": "TitleLabel",
+                                "Text": "DaVinci Gate",
+                                "Weight": 0,
+                            }
+                        ),
+                        ui.Label(
+                            {
+                                "ID": "HostsLabel",
+                                "Text": _hosts_summary(initial_hosts),
+                                "Weight": 0,
+                                "WordWrap": True,
+                            }
+                        ),
+                        ui.CheckBox(
+                            {
+                                "ID": "AutoCalibrateCheckBox",
+                                "Text": "Auto-calibrate threshold per host (recommended)",
+                                "Checked": initial_settings.auto_calibrate,
+                                "Weight": 0,
+                            }
+                        ),
+                        _field_row(
+                            "Strictness (%, higher = more strict):",
+                            "StrictnessField",
+                            strictness_initial,
+                        ),
+                        _field_row(
+                            "Manual threshold (dB, if auto off):",
+                            "ThresholdField",
+                            f"{initial_settings.silence_threshold_db}",
+                        ),
+                        _field_row(
+                            "Min silence (ms, detection):",
+                            "MinSilenceField",
+                            f"{initial_settings.min_silence_ms}",
+                        ),
+                        _field_row(
+                            "Min silence to gate (ms, timeline):",
+                            "MinGatedField",
+                            f"{initial_settings.min_gated_ms}",
+                        ),
+                        _field_row(
+                            "Padding (ms):",
+                            "PaddingField",
+                            f"{initial_settings.padding_ms}",
+                        ),
+                        ui.Label(
+                            {
+                                "ID": "OverrideHeader",
+                                "Text": override_header_text,
+                                "Weight": 0,
+                            }
+                        ),
+                        *override_rows,
+                        ui.Label(
+                            {
+                                "ID": "PreviewLabel",
+                                "Text": "Per-host preview (empty; click Analyze):",
+                                "Weight": 0,
+                            }
+                        ),
+                        ui.Tree(
+                            {
+                                "ID": "PreviewTree",
+                                "Weight": 1.0,
+                                "MinimumSize": [640, 120],
+                                "AlternatingRowColors": True,
+                                "RootIsDecorated": False,
+                                "ItemsExpandable": False,
+                            }
+                        ),
+                        ui.Label(
+                            {
+                                "ID": "StatusLabel",
+                                "Text": "Ready. Click Analyze to render, cache, and preview.",
+                                "Weight": 0,
+                                "WordWrap": True,
+                            }
+                        ),
+                        ui.HGroup(
+                            {"Weight": 0, "Spacing": 8},
+                            [
+                                ui.Button({"ID": "RefreshButton", "Text": "Refresh hosts"}),
+                                ui.Button({"ID": "AnalyzeButton", "Text": "Analyze"}),
+                                ui.Button({"ID": "ApplyButton", "Text": "Apply", "Enabled": False}),
+                                ui.Button({"ID": "ClearCacheButton", "Text": "Clear cache"}),
+                                ui.Button({"ID": "CloseButton", "Text": "Close"}),
+                            ],
+                        ),
+                    ],
                 )
+            ],
+        )
+    except Exception as e:
+        print(f">>> UI init: AddWindow failed: {e}")
+        return False
+    if win is None:
+        print(">>> UI init: AddWindow returned None")
+        return False
+
+    try:
+        items = win.GetItems()
+    except Exception:
+        items = {}
+
+    try:
+        tree = items["PreviewTree"]
+        tree.ColumnCount = 6
+        tree.SetHeaderLabels(
+            [
+                "Host",
+                "Floor (dB)",
+                "Speech (dB)",
+                "Threshold (dB)",
+                "Silence %",
+                "Gated time",
+            ]
+        )
+    except Exception as e:
+        print(f">>> UI init: Tree setup failed ({e}); preview table may render oddly")
+
+    state = {
+        "plan": None,
+        "analyzed_settings": None,
+    }
+
+    def _set_text(field_id: str, text: str) -> None:
+        try:
+            items[field_id].Text = text
+        except Exception:
+            pass
+
+    def _set_enabled(field_id: str, enabled: bool) -> None:
+        try:
+            items[field_id].Enabled = enabled
+        except Exception:
+            pass
+
+    def _set_status(msg: str) -> None:
+        _set_text("StatusLabel", msg)
+
+    def _busy(is_busy: bool) -> None:
+        for bid in ("RefreshButton", "AnalyzeButton", "ApplyButton", "ClearCacheButton"):
+            _set_enabled(bid, not is_busy)
+        if not is_busy:
+            _set_enabled("ApplyButton", state["plan"] is not None)
+
+    def _invalidate_plan(reason: Optional[str] = None) -> None:
+        if state["plan"] is not None or reason:
+            state["plan"] = None
+            state["analyzed_settings"] = None
+            _set_enabled("ApplyButton", False)
+            if reason:
+                _set_status(reason)
+
+    def _clear_tree() -> None:
+        try:
+            items["PreviewTree"].Clear()
+        except Exception:
+            pass
+
+    def _populate_tree(summaries) -> None:
+        _clear_tree()
+        tree_w = items.get("PreviewTree")
+        if tree_w is None:
+            return
+        for s in summaries:
+            try:
+                row = tree_w.NewItem()
+                row.Text[0] = s.host_name
+                row.Text[1] = f"{s.noise_floor_db:.1f}" if s.noise_floor_db is not None else "-"
+                row.Text[2] = f"{s.speech_level_db:.1f}" if s.speech_level_db is not None else "-"
+                row.Text[3] = f"{s.threshold_db:.1f}" if s.threshold_db is not None else "-"
+                row.Text[4] = f"{s.pct_disabled * 100.0:.1f}%"
+                row.Text[5] = _fmt_ms_hms(s.total_gated_ms)
+                tree_w.AddTopLevelItem(row)
             except Exception:
                 continue
 
-    if not hosts:
-        raise RuntimeError(
-            "No audio tracks with clips found. Please ensure your timeline has audio tracks with named clips."
-        )
-    return hosts
-
-def load_segments(json_path, fps):
-    """Load segments from JSON file with frame conversion."""
-    import json
-    segs = json.load(open(json_path))
-    out = []
-    for s in segs:
-        sF = int(s.get("startF", s.get("start_sec", 0)*fps))
-        eF = int(s.get("endF",   s.get("end_sec",   0)*fps))
-        if eF > sF: out.append((sF, eF, s.get("is_silence", False)))
-    return out
-
-def process_compound_clips(resolve_obj, tl, mp, proj, fps, hosts):
-    """One processed timeline audio track per speaker; batched append with handle refresh.
-
-    Does **not** create compound clips or Media Pool ``*_Gated`` items — segments stay
-    as editable timeline clips on new ``[Processed] …`` tracks.
-    """
-    from collections import Counter
-
-    print(f">>> Processing clips for {len(hosts)} host(s) (one processed track per speaker)...")
-
-    hosts_sorted = sorted(hosts, key=lambda h: (h["track"], h.get("start_f", 0)))
-
-    label_counts = Counter(h["compound_label"] for h in hosts_sorted)
-    for h in hosts_sorted:
-        if label_counts[h["compound_label"]] > 1:
-            h["compound_name"] = f"{h['compound_label']} A{h['track']}"
-        else:
-            h["compound_name"] = h["compound_label"]
-
-    current_track_count = tl.GetTrackCount("audio")
-    needed_tracks = current_track_count + len(hosts_sorted)
-    while tl.GetTrackCount("audio") < needed_tracks:
-        tl.AddTrack("audio")
-
-    all_infos = []
-    meta = []
-    host_segments = []
-
-    for host_idx, host in enumerate(hosts_sorted):
-        dst_idx = current_track_count + host_idx + 1
-        json_path = f"{OUTDIR}/{host['name']}.json"
-        if not os.path.exists(json_path):
-            print(f">>> No JSON file found for {host['name']}: {json_path}")
-            host_segments.append([])
-            continue
-
-        segs = load_segments(json_path, fps)
-        if not segs:
-            print(f">>> No segments found for {host['name']}")
-            host_segments.append([])
-            continue
-
-        matching_item = host["item"]
-        if not matching_item:
-            print(f">>> WARNING: No original item for {host['name']}")
-            host_segments.append([])
-            continue
-
-        mpi = matching_item.GetMediaPoolItem()
-        if not mpi:
-            print(f">>> ERROR: No Media Pool Item for {host['name']}")
-            host_segments.append([])
-            continue
-
-        timeline_start = int(matching_item.GetStart())
-        timeline_end = int(matching_item.GetEnd())
-        timeline_duration = timeline_end - timeline_start
-
-        segment_infos = []
-        for sF, eF, isSil in segs:
-            sF = max(0, min(sF, timeline_duration - 1))
-            eF = max(0, min(eF, timeline_duration))
-            if eF <= sF:
-                continue
-            record_frame = timeline_start + sF
-            clip_info = {
-                "mediaPoolItem": mpi,
-                "startFrame": sF,
-                "endFrame": eF,
-                "recordFrame": record_frame,
-                "trackIndex": dst_idx,
-                "mediaType": 2,
-                "trackType": "audio",
-            }
-            segment_infos.append(clip_info)
-            all_infos.append(clip_info)
-            meta.append({"is_silence": isSil})
-
-        host_segments.append(segment_infos)
-        print(
-            f">>> Host {host_idx + 1}/{len(hosts_sorted)} "
-            f"\"{host['compound_name']}\" → audio track {dst_idx} ({len(segment_infos)} segments)"
-        )
-
-    if not all_infos:
-        print(">>> No segment clip infos to append — aborting")
-        return
-
-    added = append_in_chunks(all_infos, mp, resolve=resolve_obj)
-    if len(added) != len(all_infos):
-        print(
-            f">>> WARNING: expected {len(all_infos)} new timeline items, got {len(added)} "
-            "(per-host segment grouping may be misaligned)"
-        )
-
-    proj, tl, mp = refresh_handles(resolve_obj)
-
-    fade_f = max(1, int(0.02 * fps))
-    disabled_count = 0
-    for clip, m in zip(added, meta):
+    def _read_settings():
         try:
-            clip.SetProperty("AudioFadeIn", fade_f)
-            clip.SetProperty("AudioFadeOut", fade_f)
-            if m.get("is_silence", False):
-                if disable_timeline_clip(clip):
-                    disabled_count += 1
+            auto_cal = bool(items["AutoCalibrateCheckBox"].Checked)
         except Exception:
-            pass
-    print(f">>> Disabled {disabled_count} silence clip(s) on processed tracks")
+            auto_cal = True
+        try:
+            strictness_pct = float(items["StrictnessField"].Text)
+            threshold = float(items["ThresholdField"].Text)
+            min_sil = int(items["MinSilenceField"].Text)
+            min_gated = int(items["MinGatedField"].Text)
+            padding = int(items["PaddingField"].Text)
+        except (KeyError, ValueError) as e:
+            return None, f"Invalid input in settings: {e}"
+        if min_sil < 0 or min_gated < 0 or padding < 0:
+            return None, (
+                "Min silence / min silence to gate / padding must be non-negative."
+            )
+        if strictness_pct < 0 or strictness_pct > 100:
+            return None, "Strictness must be between 0 and 100."
 
-    offset = 0
-    for host, infos in zip(hosts_sorted, host_segments):
-        n = len(infos)
-        if n == 0:
-            continue
-        chunk = added[offset : offset + n]
-        offset += n
-        if not chunk:
-            print(f">>> WARNING: no timeline items for host {host['compound_name']}")
-            continue
-        if len(chunk) != n:
-            print(
-                f">>> WARNING: host {host['compound_name']}: "
-                f"appended {len(chunk)}/{n} items"
+        host_overrides: dict = {}
+        for host in initial_hosts:
+            fid = f"HostOverride_{host['name']}"
+            raw = ""
+            try:
+                raw = items[fid].Text.strip()
+            except Exception:
+                pass
+            if not raw:
+                continue
+            try:
+                host_overrides[host["name"]] = float(raw)
+            except ValueError:
+                return None, (
+                    f"Invalid per-host override for "
+                    f"'{host['compound_label']}' (track {host['track']}): {raw!r}"
+                )
+
+        new = GateSettings(
+            silence_threshold_db=threshold,
+            min_silence_ms=min_sil,
+            padding_ms=padding,
+            hold_ms=initial_settings.hold_ms,
+            min_gated_ms=min_gated,
+            batch_size=initial_settings.batch_size,
+            render_preset=initial_settings.render_preset,
+            fps_hint=initial_settings.fps_hint,
+            track_name_normalize=initial_settings.track_name_normalize,
+            temp_dir=initial_settings.temp_dir,
+            selected_tracks=initial_settings.selected_tracks,
+            use_cache=initial_settings.use_cache,
+            cache_dir=initial_settings.cache_dir,
+            auto_calibrate=auto_cal,
+            strictness=strictness_pct / 100.0,
+            speech_percentile=initial_settings.speech_percentile,
+            host_thresholds=host_overrides or None,
+        )
+        return new, None
+
+    def on_close(event=None):
+        disp.ExitLoop()
+
+    def on_settings_change(event=None):
+        _invalidate_plan("Settings changed — click Analyze to refresh preview.")
+
+    def on_refresh(event=None):
+        hosts = _try_discover_hosts(resolve)
+        _set_text("HostsLabel", _hosts_summary(hosts))
+        _clear_tree()
+        if not hosts:
+            _invalidate_plan("No hosts on current timeline.")
+            return
+        initial_names = {h["name"] for h in initial_hosts}
+        current_names = {h["name"] for h in hosts}
+        if initial_names != current_names:
+            _invalidate_plan(
+                f"Refreshed. {len(hosts)} host(s) — but the host set differs "
+                "from what this window was opened with. Per-host overrides "
+                "map by name, so any renamed/added hosts won't have override "
+                "rows until you close and reopen this window."
+            )
+        else:
+            _invalidate_plan(
+                f"Refreshed. {len(hosts)} host(s) detected — click Analyze."
             )
 
-    for host_idx, host in enumerate(hosts_sorted):
-        dst_idx = current_track_count + host_idx + 1
+    def on_analyze(event=None):
+        new_settings, err = _read_settings()
+        if err:
+            _set_status(err)
+            return
+        _busy(True)
+        _set_status(
+            "Analyzing… rendering / measuring / detecting. See Console for progress."
+        )
         try:
-            tl.SetTrackName("audio", dst_idx, f"[Processed] {host['compound_name']}")
-        except Exception:
-            pass
+            plan = analyze(resolve, new_settings)
+        except Cancelled:
+            _set_status("Analyze cancelled.")
+            _invalidate_plan()
+            _busy(False)
+            return
+        except Exception as e:
+            _set_status(f"ERROR during Analyze: {e}")
+            _invalidate_plan()
+            _busy(False)
+            return
+        if plan is None:
+            _set_status("Analyze produced no plan (cancelled or no hosts).")
+            _invalidate_plan()
+            _busy(False)
+            return
 
-    n_with_segments = sum(1 for seg in host_segments if seg)
-    print(
-        f">>> Done: {n_with_segments} speaker track(s) with gated segments on timeline "
-        f"(audio tracks {current_track_count + 1}–{current_track_count + len(hosts_sorted)}). "
-        "No compound clips created."
-    )
-
-
-def create_compound_clip_from_items(tl, mp, items, compound_name):
-    """Create a compound clip from a specific list of timeline items."""
-    if not items:
-        print(f">>> ERROR: No items provided for compound clip '{compound_name}'")
-        return None
-    
-    # Create compound clip from the specific items
-    try:
-        # Try with just the items list (simplest approach)
-        compound_clip = tl.CreateCompoundClip(items)
-        
-        if compound_clip:
-            _ensure_compound_media_pool_name(compound_clip, compound_name)
-            return compound_clip
-        
-        # Try with clipName parameter
-        compound_clip_info = {"clipName": compound_name}
-        compound_clip = tl.CreateCompoundClip(items, compound_clip_info)
-        
-        if compound_clip:
-            _ensure_compound_media_pool_name(compound_clip, compound_name)
-            return compound_clip
-            
-        # Try with selection-based approach
-        tl.SetSelection([])
-        tl.SetSelection(items)
-        compound_clip = tl.CreateCompoundClip(items)
-        
-        if compound_clip:
-            _ensure_compound_media_pool_name(compound_clip, compound_name)
-            return compound_clip
-            
-        return None
-            
-    except Exception as e:
-        print(f">>> ERROR: Exception creating compound clip '{compound_name}': {e}")
-        return None
-
-def create_compound_clip_from_track(tl, mp, track_index, compound_name, resolve_obj):
-    """Create a compound clip from all items in a track."""
-    print(f">>> Creating compound clip '{compound_name}' from track {track_index}")
-    
-    # Get all items from the track
-    track_items = tl.GetItemListInTrack("audio", track_index) or []
-    if not track_items:
-        print(f">>> ERROR: No items found in track {track_index}")
-        return None
-    
-    return create_compound_clip_from_items(tl, mp, track_items, compound_name)
-
-def process_host(tl, mp, host, fps, assigned_track_index, resolve_obj, gap_frames=0):
-    """Process a single host with butt-joined speech segments only"""
-    
-    # Load silence detection results
-    json_path = os.path.join(OUTDIR, f"{host['name']}.json")
-    
-    with open(json_path, 'r') as f:
-        data = json.load(f)
-    
-    # Handle both list and dict formats
-    if isinstance(data, list):
-        segs = data
-    else:
-        segs = data['segments']
-    print(f">>> {host['name']}: {len(segs)} segments, FPS: {fps}")
-    
-    # Use the original item from discover_hosts
-    original_item = host["item"]
-    if not original_item:
-        print(f">>> ERROR: No original item for {host['name']}")
-        return
-    
-    # Use the compound clip's Media Pool Item directly
-    # The API limitation means only the first host will work, but let's try anyway
-    mpi = original_item.GetMediaPoolItem()
-    if not mpi:
-        print(f">>> ERROR: Could not get media pool item for {host['name']}")
-        return
-    
-    print(f">>> Using compound clip's Media Pool Item for {host['name']}")
-    print(f">>> Compound clip duration: {original_item.GetEnd() - original_item.GetStart()} frames")
-    
-    # Duration clamping
-    dur_frames = None
-    try:
-        frames_str = (mpi.GetClipProperty("Frames") or "").strip()
-        if frames_str:
-            dur_frames = int(float(frames_str))
-    except:
-        pass
-
-    # Build all segments to maintain sync
-    def clamp(v, lo, hi): 
-        return max(lo, min(v, hi))
-    
-    orig_start_recF = original_item.GetStart()   # anchor processed track to match timeline start
-    recF = orig_start_recF + gap_frames  # add gap between hosts
-
-    all_clip_infos = []
-    
-    for i, seg in enumerate(segs):
-        if "startF" in seg and "endF" in seg:
-            sF, eF = int(seg["startF"]), int(seg["endF"])
-        else:
-            sF = int(seg.get("start_sec", 0) * fps)
-            eF = int(seg.get("end_sec", 0) * fps)
-        if dur_frames is not None:
-            sF = clamp(sF, 0, dur_frames - 1)
-            eF = clamp(eF, 0, dur_frames)
-        if eF <= sF:
-            continue
-
-        clip_info = {
-            "mediaPoolItem": mpi,
-            "startFrame": sF,
-            "endFrame": eF,
-            "mediaType": 2,               # audio
-            "recordFrame": recF,          # place immediately after previous segment
-            "trackIndex": assigned_track_index,
-            "is_silence": seg.get("is_silence", False)  # Store silence flag for later
-        }
-        all_clip_infos.append(clip_info)
-        recF += (eF - sF)
-
-    if not all_clip_infos:
-        print(f">>> No segments for {host['name']}")
-        return
-
-    speech_count = len([c for c in all_clip_infos if not c.get("is_silence", False)])
-    silence_count = len([c for c in all_clip_infos if c.get("is_silence", False)])
-    print(f">>> Adding {len(all_clip_infos)} total clips ({speech_count} speech, {silence_count} silence) to track {assigned_track_index}...")
-    
-    # Ensure we're on Edit page and track is unlocked
-    resolve_obj.OpenPage("edit")
-    time.sleep(0.1)
-
-    # Ensure track is accessible
-
-    # Append all clips in chunks to avoid large batch failures
-    items = append_in_chunks(all_clip_infos, mp)
-    
-    print(f">>> {host['name']}: appended {len(items)} total clips to track {assigned_track_index}")
-
-    disabled_count = 0
-    fade_s = CONFIG["crossfade_ms"] / 1000.0  # Convert ms to seconds
-    fade_f = max(1, int(fade_s * fps))
-    
-    for i, item in enumerate(items):
+        state["plan"] = plan
+        state["analyzed_settings"] = new_settings
         try:
-            item.SetProperty("AudioFadeIn", fade_f)
-            item.SetProperty("AudioFadeOut", fade_f)
-            if i < len(all_clip_infos) and all_clip_infos[i].get("is_silence", False):
-                if disable_timeline_clip(item):
-                    disabled_count += 1
-        except Exception:
-            pass
+            summaries = summarize(plan)
+        except Exception as e:
+            summaries = []
+            print(f">>> WARNING: summarize failed: {e}")
+        _populate_tree(summaries)
 
-    print(f">>> Created [Processed] {host['name']} with {len(items)} clips ({disabled_count} silence segments disabled)")
-    
-    # Final track count
-    track_items = tl.GetItemListInTrack("audio", assigned_track_index) or []
-    print(f">>> Track {assigned_track_index} now has {len(track_items)} items")
-    
-    # Create compound clip from the processed track
-    print(f">>> Attempting to create compound clip for {host['name']}...")
-    compound_name = f"{host['name']}_Gated"
-    
-    # Add a small delay to ensure all clips are properly placed
-    time.sleep(0.5)
-    
-    # Verify items are still on the track before creating compound clip
-    final_track_items = tl.GetItemListInTrack("audio", assigned_track_index) or []
-    print(f">>> Final verification: Track {assigned_track_index} has {len(final_track_items)} items before compound creation")
-    
-    if final_track_items:
-        # Create compound clip from just this speaker's clips (the items we just added)
-        compound_clip = create_compound_clip_from_items(tl, mp, items, compound_name)
-        
-        if compound_clip:
-            print(f">>> Successfully created compound clip '{compound_name}' for {host['name']}")
+        total_gated = sum(s.total_gated_ms for s in summaries)
+        total_sil = sum(s.n_silence_segments for s in summaries)
+        cache_note = ""
+        if plan.cache_misses == 0 and plan.cache_hits > 0:
+            cache_note = " (all hosts from cache)"
+        elif plan.cache_misses > 0:
+            cache_note = f" (rendered {plan.cache_misses}, cached {plan.cache_hits})"
+
+        _set_status(
+            f"Analyzed{cache_note}. {total_sil} silence segment(s) total, "
+            f"{_fmt_ms_hms(total_gated)} would be gated. Click Apply to commit."
+        )
+        _busy(False)
+
+    def on_apply(event=None):
+        if state["plan"] is None or state["analyzed_settings"] is None:
+            _set_status("Nothing to apply — click Analyze first.")
+            return
+        _busy(True)
+        _set_status("Applying to timeline… see Console for progress.")
+        try:
+            result = commit(resolve, state["plan"], state["analyzed_settings"])
+        except Cancelled:
+            _set_status("Apply cancelled.")
+            _busy(False)
+            return
+        except Exception as e:
+            _set_status(f"ERROR during Apply: {e}")
+            _busy(False)
+            return
+        _print_result(result)
+        _invalidate_plan()
+        if result is None:
+            _set_status("Applied: cancelled.")
         else:
-            print(f">>> WARNING: Could not create compound clip for {host['name']}")
-            print(f">>> You may need to manually select the {len(items)} clips for {host['name']} and create a compound clip")
-    else:
-        print(f">>> ERROR: No items found on track {assigned_track_index} for compound clip creation")
-        compound_clip = None
-    
-    return compound_clip
+            method_str = (
+                ", ".join(f"{k}={v}" for k, v in (result.disabled_by_method or {}).items())
+                or "n/a"
+            )
+            warn_count = len(result.warnings) if result.warnings else 0
+            _set_status(
+                f"Applied. Disabled {result.disabled_count} clip(s) across "
+                f"{result.tracks_created} track(s). Methods: {method_str}. "
+                f"Warnings: {warn_count}. Re-Analyze to try different settings."
+            )
+        _busy(False)
 
-def main():
-    """Main function."""
+    def on_clear_cache(event=None):
+        cleared = clear_project_cache(resolve, initial_settings.cache_dir)
+        if cleared:
+            _set_status(f"Cleared cache for current project: {cleared}")
+        else:
+            _set_status("No cache to clear (or cache path unavailable).")
+        _invalidate_plan()
+
+    win.On.DGateMainWindow.Close = on_close
+    win.On.CloseButton.Clicked = on_close
+    win.On.RefreshButton.Clicked = on_refresh
+    win.On.AnalyzeButton.Clicked = on_analyze
+    win.On.ApplyButton.Clicked = on_apply
+    win.On.ClearCacheButton.Clicked = on_clear_cache
+    win.On.AutoCalibrateCheckBox.Clicked = on_settings_change
+
+    field_ids = [
+        "StrictnessField",
+        "ThresholdField",
+        "MinSilenceField",
+        "MinGatedField",
+        "PaddingField",
+    ]
+    for host in initial_hosts:
+        field_ids.append(f"HostOverride_{host['name']}")
+    for fid in field_ids:
+        try:
+            getattr(win.On, fid).TextEdited = on_settings_change
+        except Exception:
+            try:
+                getattr(win.On, fid).TextChanged = on_settings_change
+            except Exception:
+                pass
+
+    win.Show()
+    disp.RunLoop()
+    win.Hide()
+    return True
+
+
+def main() -> int:
     if not resolve:
         print("ERROR: Could not connect to DaVinci Resolve")
-        return
-    
-    # Get project and timeline
-    proj = resolve.GetProjectManager().GetCurrentProject()
-    if not proj:
-        print("ERROR: No project loaded")
-        return
-    
-    tl = proj.GetCurrentTimeline()
-    if not tl:
-        print("ERROR: No timeline loaded")
-        return
-    
-    # Discover hosts
-    try:
-        hosts = discover_hosts(tl)
-    except RuntimeError as e:
-        print(f"ERROR: {e}")
-        return
-    
-    # Render audio files
-    print(">>> Switching to Deliver page")
-    resolve.OpenPage("deliver")
-    proj = resolve.GetProjectManager().GetCurrentProject()
-    tl = proj.GetCurrentTimeline()
-    mp = proj.GetMediaPool()
-    
-    # Load render preset
-    render_preset = CONFIG["render_preset"]
-    print(f">>> Exporting with render preset: {render_preset}")
-    
-    # Try to activate the preset
-    preset_activated = False
-    try:
-        proj.LoadRenderPreset(render_preset)
-        preset_activated = True
-    except Exception as e:
-        try:
-            proj.SetCurrentRenderPreset(render_preset)
-            preset_activated = True
-        except Exception as e:
-            print(f">>> WARNING: Could not load render preset '{render_preset}' - using current preset")
-    
-    # Set render mode and directory
-    proj.SetCurrentRenderMode(0)
-    try:
-        proj.SetRenderSettings({"TargetDir": OUTDIR})
-    except Exception as e:
-        print(f">>> ERROR: Could not set target directory")
-        return
-    
-    # Add render job and start rendering
-    job_id = proj.AddRenderJob()
-    if not job_id:
-        print("ERROR: Could not create render job")
-        return
-    
-    proj.StartRendering()
-    
-    # Wait for render to complete
-    while proj.IsRenderingInProgress():
-        time.sleep(1)
-    
-    proj.DeleteRenderJob(job_id)
-    
-    # Get media pool
-    mp = proj.GetMediaPool()
-    if not mp:
-        print("ERROR: No media pool available")
-        return
-    
-    # Process silence detection
-    all_wav_files = glob.glob(os.path.join(OUTDIR, "*.wav"))
-    
-    # Collect individual WAV files for each host
-    per_host_wavs = []
-    for host in hosts:
-        wav_file = None
-        patterns_to_try = [
-            f"{host['clip']}.wav",
-            f"{host['clip']}00000000.wav",
-            f"{host['clip']}_00000000.wav",
-            f"{host['name']}.wav",
-            f"{host['name']}00000000.wav",
-            f"{host['name']}_00000000.wav"
-        ]
-        
-        for pattern in patterns_to_try:
-            candidate = os.path.join(OUTDIR, pattern)
-            if os.path.exists(candidate):
-                wav_file = candidate
-                break
-        
-        if wav_file:
-            per_host_wavs.append((host, wav_file))
-    
-    # Run silence detection (stdlib wave reader — no pydub/numpy; supports 24-bit WAV)
-    if per_host_wavs:
-        analysis_fps = float(proj.GetSetting("timelineFrameRate") or CONFIG["fps_hint"])
-        successful = 0
-        failed_hosts = []
-        for host, wav_file in per_host_wavs:
-            json_path = os.path.join(OUTDIR, f"{host['name']}.json")
-            
-            try:
-                print(f">>> Analyzing: {host['name']} ({wav_file})")
-                detect_silence(
-                    wav_file,
-                    min_sil_ms=CONFIG["min_silence_ms"],
-                    pad_ms=CONFIG["padding_ms"],
-                    out_json=json_path,
-                    silence_thresh_db=CONFIG["silence_threshold_db"],
-                    fps_hint=analysis_fps,
-                    hold_ms=CONFIG.get("hold_ms", 500),
-                )
-                
-                if os.path.exists(json_path):
-                    successful += 1
-                else:
-                    failed_hosts.append(host["name"])
-            except Exception as e:
-                print(f">>> ERROR: Silence detection failed for {host['name']}: {e}")
-                failed_hosts.append(host["name"])
-        
-        print(f">>> Silence detection complete: {successful}/{len(per_host_wavs)} successful")
-        if failed_hosts:
-            print(f">>> ERROR: No analysis JSON for: {', '.join(failed_hosts)}")
-            print(">>> Aborting timeline rebuild — sync detect_silence.py and re-run.")
-            return
-    else:
-        print(f">>> ERROR: No WAV files found for processing")
-        return
-    
-    # Switch to edit page and process audio
-    print(">>> Switching to Edit page")
-    proj, tl, mp = refresh_handles(resolve)
-    
-    # Get FPS from timeline settings
-    fps = float(proj.GetSetting("timelineFrameRate") or "29.97")
-    
-    # Process clips using grouped approach
-    use_compound_processing = CONFIG.get("use_compound_processing", True)
-    
-    if use_compound_processing:
-        process_compound_clips(resolve, tl, mp, proj, fps, hosts)
-    else:
-        # Individual processing approach (simplified)
-        print(">>> Using individual track processing approach")
-        # ... individual processing code would go here if needed
-    
-    print(">>> Processing complete (timeline processed tracks; no compounds).")
+        return 1
+
+    settings = _build_settings()
+
+    if os.environ.get("DAVINCIGATE_HEADLESS"):
+        print(">>> Headless mode (DAVINCIGATE_HEADLESS is set)")
+        result = run_headless(resolve, settings)
+        _print_result(result)
+        return 0 if result is not None else 130
+
+    if _launch_ui(resolve, settings):
+        return 0
+
+    print(">>> UI unavailable; falling back to headless mode.")
+    result = run_headless(resolve, settings)
+    _print_result(result)
+    return 0 if result is not None else 130
+
 
 if __name__ == "__main__":
-    try:
-        main()
-    finally:
-        # Clean up temp directory
-        if os.path.exists(OUTDIR):
-            shutil.rmtree(OUTDIR, ignore_errors=True)
+    sys.exit(main())
